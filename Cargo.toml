@@ -1,0 +1,19 @@
+[package]
+name = "ex3"
+version = "0.1.0"
+edition = "2021"
+description = "Assembler, emulator and debugger for the EX3 32-bit ISA"
+license = "MIT"
+
+[lib]
+name = "ex3"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ex3"
+path = "src/main.rs"
+
+[profile.release]
+lto = true
+strip = true
+
