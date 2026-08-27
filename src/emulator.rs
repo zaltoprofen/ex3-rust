@@ -66,9 +66,17 @@ pub enum IoKind {
     Serial,
     Parallel,
 }
+
+/// Information needed by peripherals whose timing depends on CPU I/O state.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct IoTickContext {
+    pub interrupt_enabled: bool,
+    pub interrupt_mask: u8,
+}
+
 /// CPUコアから周辺機器を分離するためのI/Oインターフェース。
 pub trait IoBus {
-    fn tick(&mut self) {}
+    fn tick(&mut self, _context: IoTickContext) {}
     fn interrupt_pending(&self) -> bool {
         false
     }
@@ -136,7 +144,7 @@ impl DeterministicIoBus {
     }
 }
 impl IoBus for DeterministicIoBus {
-    fn tick(&mut self) {
+    fn tick(&mut self, _context: IoTickContext) {
         self.serial_output_ready = true;
         self.parallel_output_ready = true
     }
@@ -186,8 +194,10 @@ pub struct LegacyIoBus {
     parallel_pending: VecDeque<u8>,
     serial_ready: Option<u8>,
     parallel_ready: Option<u8>,
-    serial_delay: u8,
-    parallel_delay: u8,
+    serial_input_delay: Option<u8>,
+    parallel_input_delay: Option<u8>,
+    serial_output_delay: Option<u8>,
+    parallel_output_delay: Option<u8>,
     serial_output: Vec<u8>,
     parallel_output: Vec<u8>,
     serial_output_ready: bool,
@@ -201,12 +211,14 @@ impl LegacyIoBus {
             parallel_pending: VecDeque::new(),
             serial_ready: None,
             parallel_ready: None,
-            serial_delay: 1,
-            parallel_delay: 1,
+            serial_input_delay: None,
+            parallel_input_delay: None,
+            serial_output_delay: None,
+            parallel_output_delay: None,
             serial_output: Vec::new(),
             parallel_output: Vec::new(),
-            serial_output_ready: true,
-            parallel_output_ready: true,
+            serial_output_ready: false,
+            parallel_output_ready: false,
         }
     }
     pub fn push_input(&mut self, kind: IoKind, value: u8) {
@@ -232,24 +244,46 @@ impl Default for LegacyIoBus {
     }
 }
 impl IoBus for LegacyIoBus {
-    fn tick(&mut self) {
-        self.serial_output_ready = true;
-        self.parallel_output_ready = true;
-        if self.serial_ready.is_none() && !self.serial_pending.is_empty() {
-            if self.serial_delay > 1 {
-                self.serial_delay -= 1;
-            } else {
-                self.serial_ready = self.serial_pending.pop_front();
-                self.serial_delay = self.next_delay();
+    fn tick(&mut self, context: IoTickContext) {
+        // The Scala controller executes only devices selected by a set mask bit.
+        if !context.interrupt_enabled {
+            return;
+        }
+
+        if context.interrupt_mask & 0x8 != 0
+            && self.serial_ready.is_none()
+            && !self.serial_pending.is_empty()
+        {
+            match self.serial_input_delay {
+                None => self.serial_input_delay = Some(self.next_delay()),
+                Some(0) => {
+                    self.serial_ready = self.serial_pending.pop_front();
+                    self.serial_input_delay = None;
+                }
+                Some(delay) => self.serial_input_delay = Some(delay - 1),
             }
         }
-        if self.parallel_ready.is_none() && !self.parallel_pending.is_empty() {
-            if self.parallel_delay > 1 {
-                self.parallel_delay -= 1;
-            } else {
-                self.parallel_ready = self.parallel_pending.pop_front();
-                self.parallel_delay = self.next_delay();
+        if context.interrupt_mask & 0x4 != 0 && !self.serial_output_ready {
+            advance_output(&mut self.serial_output_delay, &mut self.serial_output_ready);
+        }
+        if context.interrupt_mask & 0x2 != 0
+            && self.parallel_ready.is_none()
+            && !self.parallel_pending.is_empty()
+        {
+            match self.parallel_input_delay {
+                None => self.parallel_input_delay = Some(self.next_delay()),
+                Some(0) => {
+                    self.parallel_ready = self.parallel_pending.pop_front();
+                    self.parallel_input_delay = None;
+                }
+                Some(delay) => self.parallel_input_delay = Some(delay - 1),
             }
+        }
+        if context.interrupt_mask & 0x1 != 0 && !self.parallel_output_ready {
+            advance_output(
+                &mut self.parallel_output_delay,
+                &mut self.parallel_output_ready,
+            );
         }
     }
     fn read_input(&mut self, kind: IoKind) -> Option<u8> {
@@ -263,10 +297,12 @@ impl IoBus for LegacyIoBus {
             IoKind::Serial => {
                 self.serial_output.push(value);
                 self.serial_output_ready = false;
+                self.serial_output_delay = None;
             }
             IoKind::Parallel => {
                 self.parallel_output.push(value);
                 self.parallel_output_ready = false;
+                self.parallel_output_delay = None;
             }
         }
     }
@@ -281,6 +317,18 @@ impl IoBus for LegacyIoBus {
             IoKind::Serial => self.serial_output_ready,
             IoKind::Parallel => self.parallel_output_ready,
         }
+    }
+}
+
+/// Advance the legacy output state machine by one enabled tick.
+fn advance_output(delay: &mut Option<u8>, ready: &mut bool) {
+    match *delay {
+        None => *delay = Some(1),
+        Some(0) => {
+            *ready = true;
+            *delay = None;
+        }
+        Some(remaining) => *delay = Some(remaining - 1),
     }
 }
 
@@ -396,10 +444,10 @@ impl Cpu {
             return Ok(StepOutcome::Halted);
         }
 
-        // 旧実装ではIEN=0の間、CPUだけでなく周辺機器の時間も停止する。
-        if self.mode == CompatibilityMode::Strict || self.io.interrupt_enabled {
-            io.tick();
-        }
+        io.tick(IoTickContext {
+            interrupt_enabled: self.io.interrupt_enabled,
+            interrupt_mask: self.io.interrupt_mask,
+        });
 
         let masked_interrupt = (self.io.interrupt_mask & 0x8 != 0
             && io.input_ready(IoKind::Serial))
@@ -551,6 +599,10 @@ impl Cpu {
                 match op {
                     N2Op::Add => self.add(lhs, rhs),
                     // EX3のN2 SUBはoperand2 - operand1の順序である。
+                    N2Op::Sub if self.mode == CompatibilityMode::Legacy => {
+                        // Historical N2 SUB did not update E.
+                        self.state.ac = rhs.wrapping_sub(lhs)
+                    }
                     N2Op::Sub => self.sub(rhs, lhs),
                     N2Op::And => self.state.ac = lhs & rhs,
                     N2Op::Or => self.state.ac = lhs | rhs,
@@ -630,7 +682,7 @@ impl Cpu {
                         self.io.input_register = v;
                         self.state.ac = if self.mode == CompatibilityMode::Legacy {
                             // Scala ByteからIntへの符号拡張を互換再現する。
-                            (v as i8 as i32) as u32
+                            (self.state.ac & 0xffff_ff00) | ((v as i8 as i32) as u32)
                         } else {
                             (self.state.ac & 0xffffff00) | v as u32
                         }
@@ -682,6 +734,18 @@ mod tests {
         assert_eq!(c.state.executed_instructions, 1)
     }
     #[test]
+    fn pc_wraps_from_fff_to_000() {
+        let mut cpu = Cpu::default();
+        let mut memory = ArrayMemory::default();
+        let mut io = NullIoBus;
+        cpu.state.pc = Address::new(0xfff).unwrap();
+        at(&mut memory, 0xfff, Instruction::NoOperand(NoOperandOp::Hlt));
+
+        cpu.step(&mut memory, &mut io).unwrap();
+
+        assert_eq!(cpu.state.pc, Address::ZERO);
+    }
+    #[test]
     fn arithmetic_and_carry() {
         let mut c = Cpu::default();
         let mut m = ArrayMemory::default();
@@ -698,6 +762,48 @@ mod tests {
         c.step(&mut m, &mut io).unwrap();
         assert_eq!(c.state.ac, 0);
         assert!(c.state.e)
+    }
+    #[test]
+    fn strict_sub_sets_borrow() {
+        let mut cpu = Cpu::default();
+        let mut memory = ArrayMemory::default();
+        let mut io = NullIoBus;
+        let value = Address::new(0x20).unwrap();
+        memory.write(value, 1);
+        at(
+            &mut memory,
+            0x10,
+            Instruction::N1 {
+                op: N1Op::Sub,
+                operand: value,
+                indirect: false,
+            },
+        );
+
+        cpu.step(&mut memory, &mut io).unwrap();
+
+        assert_eq!(cpu.state.ac, u32::MAX);
+        assert!(cpu.state.e);
+    }
+    #[test]
+    fn legacy_add_e_matches_scala_rule() {
+        let mut cpu = Cpu::new(CompatibilityMode::Legacy);
+        let mut memory = ArrayMemory::default();
+        let mut io = NullIoBus;
+        cpu.state.ac = u32::MAX;
+        at(
+            &mut memory,
+            0x10,
+            Instruction::Immediate {
+                op: ImmediateOp::Add,
+                value: crate::isa::Immediate12::from_signed(1).unwrap(),
+            },
+        );
+
+        cpu.step(&mut memory, &mut io).unwrap();
+
+        assert_eq!(cpu.state.ac, 0);
+        assert!(!cpu.state.e);
     }
     #[test]
     fn indirect_load_store() {
@@ -779,6 +885,148 @@ mod tests {
         assert_eq!(m.read(Address::ZERO), 0x11);
         assert_eq!(c.state.pc.get(), 1)
     }
+
+    #[test]
+    fn legacy_inp_preserves_upper_bits_for_ascii_input() {
+        let mut cpu = Cpu::new(CompatibilityMode::Legacy);
+        let mut memory = ArrayMemory::default();
+        let mut io = DeterministicIoBus::default();
+        cpu.state.ac = 0x1234_0000;
+        io.push_input(IoKind::Parallel, 0x41);
+        at(&mut memory, 0x10, Instruction::NoOperand(NoOperandOp::Inp));
+
+        cpu.step(&mut memory, &mut io).unwrap();
+
+        assert_eq!(cpu.state.ac, 0x1234_0041);
+    }
+
+    #[test]
+    fn strict_inp_zero_extends_high_bit_input() {
+        let mut cpu = Cpu::default();
+        let mut memory = ArrayMemory::default();
+        let mut io = DeterministicIoBus::default();
+        cpu.state.ac = 0x1234_0000;
+        io.push_input(IoKind::Parallel, 0x80);
+        at(&mut memory, 0x10, Instruction::NoOperand(NoOperandOp::Inp));
+
+        cpu.step(&mut memory, &mut io).unwrap();
+
+        assert_eq!(cpu.state.ac, 0x1234_0080);
+    }
+
+    #[test]
+    fn legacy_inp_reproduces_signed_byte_promotion() {
+        let mut cpu = Cpu::new(CompatibilityMode::Legacy);
+        let mut memory = ArrayMemory::default();
+        let mut io = DeterministicIoBus::default();
+        cpu.state.ac = 0x1234_0000;
+        io.push_input(IoKind::Parallel, 0x80);
+        at(&mut memory, 0x10, Instruction::NoOperand(NoOperandOp::Inp));
+
+        cpu.step(&mut memory, &mut io).unwrap();
+
+        assert_eq!(cpu.state.ac, 0xffff_ff80);
+    }
+
+    #[test]
+    fn legacy_n2_sub_preserves_e() {
+        let a = Address::new(0x20).unwrap();
+        let b = Address::new(0x21).unwrap();
+        let instruction = Instruction::N2 {
+            op: N2Op::Sub,
+            operand1: a,
+            operand2: b,
+            indirect: false,
+        };
+
+        for (lhs, rhs, initial_e, expected) in [(3, 10, true, 7), (10, 3, false, 0xffff_fff9)] {
+            let mut cpu = Cpu::new(CompatibilityMode::Legacy);
+            let mut memory = ArrayMemory::default();
+            let mut io = NullIoBus;
+            cpu.state.e = initial_e;
+            memory.write(a, lhs);
+            memory.write(b, rhs);
+            at(&mut memory, 0x10, instruction);
+
+            cpu.step(&mut memory, &mut io).unwrap();
+
+            assert_eq!(cpu.state.ac, expected);
+            assert_eq!(cpu.state.e, initial_e);
+        }
+    }
+
+    #[test]
+    fn legacy_output_is_not_ready_at_reset() {
+        let io = LegacyIoBus::new(1);
+        assert!(!io.output_ready(IoKind::Serial));
+        assert!(!io.output_ready(IoKind::Parallel));
+    }
+
+    #[test]
+    fn legacy_unmasked_port_does_not_tick() {
+        let mut io = LegacyIoBus::new(1);
+        let serial_only = IoTickContext {
+            interrupt_enabled: true,
+            interrupt_mask: 0x4,
+        };
+        for _ in 0..10 {
+            io.tick(serial_only);
+        }
+        assert!(io.output_ready(IoKind::Serial));
+        assert!(!io.output_ready(IoKind::Parallel));
+    }
+
+    #[test]
+    fn legacy_disabled_interrupt_freezes_peripheral_time() {
+        let mut io = LegacyIoBus::new(1);
+        let disabled = IoTickContext {
+            interrupt_enabled: false,
+            interrupt_mask: 0x1,
+        };
+        for _ in 0..10 {
+            io.tick(disabled);
+        }
+        assert!(!io.output_ready(IoKind::Parallel));
+    }
+
+    #[test]
+    fn legacy_parallel_output_becomes_ready_after_expected_ticks() {
+        let mut io = LegacyIoBus::new(1);
+        let parallel_output = IoTickContext {
+            interrupt_enabled: true,
+            interrupt_mask: 0x1,
+        };
+        io.tick(parallel_output); // interval -1 -> 1
+        assert!(!io.output_ready(IoKind::Parallel));
+        io.tick(parallel_output); // interval 1 -> 0
+        assert!(!io.output_ready(IoKind::Parallel));
+        io.tick(parallel_output); // interval 0 -> ready
+        assert!(io.output_ready(IoKind::Parallel));
+    }
+
+    #[test]
+    fn legacy_input_delay_is_seed_deterministic() {
+        let mut first = LegacyIoBus::new(1234);
+        let mut second = LegacyIoBus::new(1234);
+        first.push_input(IoKind::Serial, 0x41);
+        second.push_input(IoKind::Serial, 0x41);
+        let serial_input = IoTickContext {
+            interrupt_enabled: true,
+            interrupt_mask: 0x8,
+        };
+        for _ in 0..100 {
+            assert_eq!(
+                first.input_ready(IoKind::Serial),
+                second.input_ready(IoKind::Serial)
+            );
+            first.tick(serial_input);
+            second.tick(serial_input);
+        }
+        assert_eq!(
+            first.read_input(IoKind::Serial),
+            second.read_input(IoKind::Serial)
+        );
+    }
     #[test]
     fn branch_legacy_swap() {
         let mut m = ArrayMemory::default();
@@ -798,5 +1046,28 @@ mod tests {
         let mut legacy = Cpu::new(CompatibilityMode::Legacy);
         legacy.step(&mut m, &mut io).unwrap();
         assert_eq!(legacy.state.pc.get(), 0x11)
+    }
+    #[test]
+    fn legacy_jza_is_jna_and_jna_is_jza() {
+        let target = Address::new(0x20).unwrap();
+        for (op, ac) in [(N1Op::Jza, 0x8000_0000), (N1Op::Jna, 0)] {
+            let mut cpu = Cpu::new(CompatibilityMode::Legacy);
+            let mut memory = ArrayMemory::default();
+            let mut io = NullIoBus;
+            cpu.state.ac = ac;
+            at(
+                &mut memory,
+                0x10,
+                Instruction::N1 {
+                    op,
+                    operand: target,
+                    indirect: false,
+                },
+            );
+
+            cpu.step(&mut memory, &mut io).unwrap();
+
+            assert_eq!(cpu.state.pc, target);
+        }
     }
 }

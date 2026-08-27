@@ -107,4 +107,23 @@ mod tests {
         assert_eq!(format_probe(&i), "00202345\nf0000000\n");
         assert_eq!(parse_mem(&format_mem(&i)).unwrap().len(), 2);
     }
+    #[test]
+    fn probe_uses_low16_and_excludes_symbols() {
+        let image = MemoryImage {
+            cells: vec![
+                MemoryCell {
+                    address: Address::new(0xabc).unwrap(),
+                    word: 0x1234_5678,
+                    kind: CellKind::Data,
+                },
+                MemoryCell {
+                    address: Address::new(0xdef).unwrap(),
+                    word: 0x42,
+                    kind: CellKind::Symbol,
+                },
+            ],
+        };
+
+        assert_eq!(format_probe(&image), "0abc5678\nf0000000\n");
+    }
 }

@@ -9,7 +9,8 @@ pub mod output;
 /// アセンブラとCPUが使用する互換性ポリシー。
 ///
 /// [`Strict`](Self::Strict) はEX3の意図された仕様を実装する。
-/// [`Legacy`](Self::Legacy) は旧Scala実装との比較に必要な既知の挙動を再現する。
+/// [`Legacy`](Self::Legacy) は旧Scala実装との比較に必要な、選択されたCPU/I/Oの
+/// 観測可能挙動を再現する。不正なアセンブリ入力まで完全なparser互換を保証しない。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CompatibilityMode {
     /// 範囲検証と正しいcarry、rotate、分岐条件を使用する標準モード。

@@ -1,7 +1,9 @@
 use ex3::{
     assembler::{Assembler, CellKind},
     debugger::{format_current, format_registers, Debugger, RunStop},
-    emulator::{ArrayMemory, Cpu, Memory, NullIoBus, StepOutcome},
+    emulator::{
+        ArrayMemory, Cpu, IoBus, IoKind, IoTickContext, LegacyIoBus, Memory, NullIoBus, StepOutcome,
+    },
     isa::{decode, Address},
     output::{format_mem, format_probe, parse_mem},
     CompatibilityMode,
@@ -50,7 +52,7 @@ fn real_main() -> Result<(), Box<dyn Error>> {
     }
 }
 fn print_help() {
-    println!("EX3 32-bit assembler and emulator\n\nUsage:\n  ex3 assemble <file.asm> [-o file.mem] [--probe file.prb] [--compat strict|legacy]\n  ex3 check <file.asm> [--compat strict|legacy]\n  ex3 run <file.asm|file.mem> [--compat strict|legacy] [--max-steps N] [--trace] [--break ADDR]\n  ex3 debug <file.asm|file.mem> [--compat strict|legacy]\n  ex3 disasm --word <WORD>\n  ex3 disasm --file <file.mem>")
+    println!("EX3 32-bit assembler and emulator\n\nUsage:\n  ex3 assemble <file.asm> [-o file.mem] [--probe file.prb] [--compat strict|legacy]\n  ex3 check <file.asm> [--compat strict|legacy]\n  ex3 run <file.asm|file.mem> [--compat strict|legacy] [--io null|legacy] [--seed N] [--max-steps N] [--trace] [--break ADDR]\n  ex3 debug <file.asm|file.mem> [--compat strict|legacy] [--io null|legacy] [--seed N]\n  ex3 disasm --word <WORD>\n  ex3 disasm --file <file.mem>")
 }
 
 // 外部crateに依存せず、小規模な`--option value`形式だけを扱う。
@@ -69,6 +71,7 @@ fn input_arg(args: &[String]) -> Result<&str, Box<dyn Error>> {
         "--max-steps",
         "--break",
         "--seed",
+        "--io",
         "--word",
         "--file",
     ];
@@ -89,6 +92,69 @@ fn mode(args: &[String]) -> Result<CompatibilityMode, Box<dyn Error>> {
         None | Some("strict") => Ok(CompatibilityMode::Strict),
         Some("legacy") => Ok(CompatibilityMode::Legacy),
         Some(v) => Err(format!("invalid compatibility mode `{v}`").into()),
+    }
+}
+
+enum RuntimeIoBus {
+    Null(NullIoBus),
+    Legacy(LegacyIoBus),
+}
+
+impl IoBus for RuntimeIoBus {
+    fn tick(&mut self, context: IoTickContext) {
+        match self {
+            Self::Null(bus) => bus.tick(context),
+            Self::Legacy(bus) => bus.tick(context),
+        }
+    }
+
+    fn interrupt_pending(&self) -> bool {
+        match self {
+            Self::Null(bus) => bus.interrupt_pending(),
+            Self::Legacy(bus) => bus.interrupt_pending(),
+        }
+    }
+
+    fn read_input(&mut self, kind: IoKind) -> Option<u8> {
+        match self {
+            Self::Null(bus) => bus.read_input(kind),
+            Self::Legacy(bus) => bus.read_input(kind),
+        }
+    }
+
+    fn write_output(&mut self, kind: IoKind, value: u8) {
+        match self {
+            Self::Null(bus) => bus.write_output(kind, value),
+            Self::Legacy(bus) => bus.write_output(kind, value),
+        }
+    }
+
+    fn input_ready(&self, kind: IoKind) -> bool {
+        match self {
+            Self::Null(bus) => bus.input_ready(kind),
+            Self::Legacy(bus) => bus.input_ready(kind),
+        }
+    }
+
+    fn output_ready(&self, kind: IoKind) -> bool {
+        match self {
+            Self::Null(bus) => bus.output_ready(kind),
+            Self::Legacy(bus) => bus.output_ready(kind),
+        }
+    }
+}
+
+fn io_bus(args: &[String]) -> Result<RuntimeIoBus, Box<dyn Error>> {
+    let seed = option(args, "--seed")
+        .map(|value| parse_u64(&value))
+        .transpose()?
+        .unwrap_or(0);
+    match option(args, "--io").as_deref() {
+        None | Some("null") => Ok(RuntimeIoBus::Null(NullIoBus)),
+        Some("legacy") => Ok(RuntimeIoBus::Legacy(LegacyIoBus::new(seed))),
+        Some(value) => {
+            Err(format!("invalid I/O backend `{value}`; expected null or legacy").into())
+        }
     }
 }
 fn assemble_source(
@@ -162,7 +228,7 @@ fn run_cmd(args: &[String]) -> Result<(), Box<dyn Error>> {
     let mode = mode(args)?;
     let mut memory = load(input, mode)?;
     let mut cpu = Cpu::new(mode);
-    let mut io = NullIoBus;
+    let mut io = io_bus(args)?;
     let max = option(args, "--max-steps")
         .map(|x| parse_u64(&x))
         .transpose()?
@@ -237,7 +303,7 @@ fn debug_cmd(args: &[String]) -> Result<(), Box<dyn Error>> {
     };
     let mut memory = load(input, mode)?;
     let mut cpu = Cpu::new(mode);
-    let mut bus = NullIoBus;
+    let mut bus = io_bus(args)?;
     let mut dbg = Debugger::new();
     println!("EX3 debugger; commands: s, r, b ADDR, regs, mem ADDR [N], data, disasm, q");
     let stdin = io::stdin();

@@ -1,0 +1,3 @@
+ORG 010
+HLT
+END

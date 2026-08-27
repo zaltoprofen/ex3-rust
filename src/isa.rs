@@ -3,7 +3,7 @@
 //! アセンブラとエミュレータはこのモジュールの [`Instruction`] を共有する。
 //! opcode を文字列で持たないことで、両者の命令表が食い違うのを防いでいる。
 
-use std::{error::Error, fmt};
+use std::{error::Error, fmt, str::FromStr};
 
 /// EX3 の1ワード。命令とデータはいずれも32 bitである。
 pub type Word = u32;
@@ -167,6 +167,68 @@ pub enum NoOperandOp {
     Hlt,
 }
 
+/// Legal operations for each instruction format. Encoding, decoding, parsing,
+/// and exhaustive tests all refer to these lists.
+pub const N1_OPS: &[N1Op] = &[
+    N1Op::Add,
+    N1Op::Sub,
+    N1Op::And,
+    N1Op::Or,
+    N1Op::Xor,
+    N1Op::Lda,
+    N1Op::Sta,
+    N1Op::Bun,
+    N1Op::Bsa,
+    N1Op::Jpa,
+    N1Op::Jza,
+    N1Op::Jna,
+    N1Op::Jze,
+    N1Op::Isz,
+];
+pub const N2_OPS: &[N2Op] = &[
+    N2Op::Add,
+    N2Op::Sub,
+    N2Op::And,
+    N2Op::Or,
+    N2Op::Xor,
+    N2Op::Move,
+];
+pub const IMMEDIATE_OPS: &[ImmediateOp] = &[
+    ImmediateOp::Add,
+    ImmediateOp::And,
+    ImmediateOp::Or,
+    ImmediateOp::Lda,
+];
+pub const MEMORY_IMMEDIATE_OPS: &[MemoryImmediateOp] = &[
+    MemoryImmediateOp::Add,
+    MemoryImmediateOp::And,
+    MemoryImmediateOp::Or,
+    MemoryImmediateOp::Sta,
+];
+pub const NO_OPERAND_OPS: &[NoOperandOp] = &[
+    NoOperandOp::Cla,
+    NoOperandOp::Cle,
+    NoOperandOp::Cma,
+    NoOperandOp::Cme,
+    NoOperandOp::Cir,
+    NoOperandOp::Cil,
+    NoOperandOp::Inc,
+    NoOperandOp::Spa,
+    NoOperandOp::Sza,
+    NoOperandOp::Sna,
+    NoOperandOp::Sze,
+    NoOperandOp::Inp,
+    NoOperandOp::Out,
+    NoOperandOp::Ski,
+    NoOperandOp::Sko,
+    NoOperandOp::Ion,
+    NoOperandOp::Iof,
+    NoOperandOp::Sio,
+    NoOperandOp::Pio,
+    NoOperandOp::Imk,
+    NoOperandOp::Hlt,
+];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 /// EX3の5種類の命令形式を表す型付き命令。
 pub enum Instruction {
@@ -326,25 +388,11 @@ pub fn decode(word: Word) -> Result<Instruction, DecodeError> {
             }
             let indirect = word & 0x4000_0000 != 0;
             let key = word & 0x03ff_f000;
-            let op = [
-                N1Op::Add,
-                N1Op::Sub,
-                N1Op::And,
-                N1Op::Or,
-                N1Op::Xor,
-                N1Op::Lda,
-                N1Op::Sta,
-                N1Op::Bun,
-                N1Op::Bsa,
-                N1Op::Jpa,
-                N1Op::Jza,
-                N1Op::Jna,
-                N1Op::Jze,
-                N1Op::Isz,
-            ]
-            .into_iter()
-            .find(|op| n1_base(*op) == key)
-            .ok_or_else(unknown)?;
+            let op = N1_OPS
+                .iter()
+                .copied()
+                .find(|op| n1_base(*op) == key)
+                .ok_or_else(unknown)?;
             Ok(Instruction::N1 {
                 op,
                 operand: Address::from_low12(word),
@@ -354,17 +402,11 @@ pub fn decode(word: Word) -> Result<Instruction, DecodeError> {
         1 | 3 => {
             let indirect = word & 0x4000_0000 != 0;
             let key = word & 0x3f00_0000;
-            let op = [
-                N2Op::Add,
-                N2Op::Sub,
-                N2Op::And,
-                N2Op::Or,
-                N2Op::Xor,
-                N2Op::Move,
-            ]
-            .into_iter()
-            .find(|op| n2_base(*op) & 0x3f00_0000 == key)
-            .ok_or_else(unknown)?;
+            let op = N2_OPS
+                .iter()
+                .copied()
+                .find(|op| n2_base(*op) & 0x3f00_0000 == key)
+                .ok_or_else(unknown)?;
             Ok(Instruction::N2 {
                 op,
                 operand1: Address::from_low12(word >> 12),
@@ -373,46 +415,21 @@ pub fn decode(word: Word) -> Result<Instruction, DecodeError> {
             })
         }
         4 => {
-            let op = [
-                NoOperandOp::Cla,
-                NoOperandOp::Cle,
-                NoOperandOp::Cma,
-                NoOperandOp::Cme,
-                NoOperandOp::Cir,
-                NoOperandOp::Cil,
-                NoOperandOp::Inc,
-                NoOperandOp::Spa,
-                NoOperandOp::Sza,
-                NoOperandOp::Sna,
-                NoOperandOp::Sze,
-                NoOperandOp::Inp,
-                NoOperandOp::Out,
-                NoOperandOp::Ski,
-                NoOperandOp::Sko,
-                NoOperandOp::Ion,
-                NoOperandOp::Iof,
-                NoOperandOp::Sio,
-                NoOperandOp::Pio,
-                NoOperandOp::Imk,
-                NoOperandOp::Hlt,
-            ]
-            .into_iter()
-            .find(|op| no_operand_word(*op) == word)
-            .ok_or_else(unknown)?;
+            let op = NO_OPERAND_OPS
+                .iter()
+                .copied()
+                .find(|op| no_operand_word(*op) == word)
+                .ok_or_else(unknown)?;
             Ok(Instruction::NoOperand(op))
         }
         5 | 7 => {
             let indirect = word & 0x4000_0000 != 0;
             let key = word & 0x3f00_0000;
-            let op = [
-                MemoryImmediateOp::Add,
-                MemoryImmediateOp::And,
-                MemoryImmediateOp::Or,
-                MemoryImmediateOp::Sta,
-            ]
-            .into_iter()
-            .find(|op| memory_immediate_base(*op) & 0x3f00_0000 == key)
-            .ok_or_else(unknown)?;
+            let op = MEMORY_IMMEDIATE_OPS
+                .iter()
+                .copied()
+                .find(|op| memory_immediate_base(*op) & 0x3f00_0000 == key)
+                .ok_or_else(unknown)?;
             Ok(Instruction::MemoryImmediate {
                 op,
                 operand: Address::from_low12(word >> 12),
@@ -425,15 +442,11 @@ pub fn decode(word: Word) -> Result<Instruction, DecodeError> {
                 return Err(unknown());
             }
             let key = word & 0xff00_0000;
-            let op = [
-                ImmediateOp::Add,
-                ImmediateOp::And,
-                ImmediateOp::Or,
-                ImmediateOp::Lda,
-            ]
-            .into_iter()
-            .find(|op| immediate_base(*op) == key)
-            .ok_or_else(unknown)?;
+            let op = IMMEDIATE_OPS
+                .iter()
+                .copied()
+                .find(|op| immediate_base(*op) == key)
+                .ok_or_else(unknown)?;
             Ok(Instruction::Immediate {
                 op,
                 value: Immediate12::from_raw((word & 0xfff) as u16).expect("masked"),
@@ -453,7 +466,7 @@ impl fmt::Display for Instruction {
             } => write!(
                 f,
                 "{} {:03x}{}",
-                n1_name(op),
+                op,
                 operand.get(),
                 if indirect { " I" } else { "" }
             ),
@@ -465,12 +478,12 @@ impl fmt::Display for Instruction {
             } => write!(
                 f,
                 "{} {:03x} {:03x}{}",
-                n2_name(op),
+                op,
                 operand1.get(),
                 operand2.get(),
                 if indirect { " I" } else { "" }
             ),
-            Self::Immediate { op, value } => write!(f, "{} {}", immediate_name(op), value.as_i32()),
+            Self::Immediate { op, value } => write!(f, "{op} {}", value.as_i32()),
             Self::MemoryImmediate {
                 op,
                 operand,
@@ -479,12 +492,12 @@ impl fmt::Display for Instruction {
             } => write!(
                 f,
                 "{} {:03x} {}{}",
-                memory_immediate_name(op),
+                op,
                 operand.get(),
                 value.as_i32(),
                 if indirect { " I" } else { "" }
             ),
-            Self::NoOperand(op) => f.write_str(no_operand_name(op)),
+            Self::NoOperand(op) => write!(f, "{op}"),
         }
     }
 }
@@ -559,6 +572,48 @@ pub const fn no_operand_name(op: NoOperandOp) -> &'static str {
     }
 }
 
+/// Returned when a mnemonic does not belong to the requested instruction format.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MnemonicParseError;
+
+impl fmt::Display for MnemonicParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("unknown mnemonic for instruction format")
+    }
+}
+impl Error for MnemonicParseError {}
+
+macro_rules! impl_mnemonic {
+    ($op:ty, $ops:ident, $name:ident) => {
+        impl FromStr for $op {
+            type Err = MnemonicParseError;
+
+            fn from_str(value: &str) -> Result<Self, Self::Err> {
+                $ops.iter()
+                    .copied()
+                    .find(|op| $name(*op) == value)
+                    .ok_or(MnemonicParseError)
+            }
+        }
+
+        impl fmt::Display for $op {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str($name(*self))
+            }
+        }
+    };
+}
+
+impl_mnemonic!(N1Op, N1_OPS, n1_name);
+impl_mnemonic!(N2Op, N2_OPS, n2_name);
+impl_mnemonic!(ImmediateOp, IMMEDIATE_OPS, immediate_name);
+impl_mnemonic!(
+    MemoryImmediateOp,
+    MEMORY_IMMEDIATE_OPS,
+    memory_immediate_name
+);
+impl_mnemonic!(NoOperandOp, NO_OPERAND_OPS, no_operand_name);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -597,22 +652,7 @@ mod tests {
         let a = Address::new(0xabc).unwrap();
         let b = Address::new(0x123).unwrap();
         let i = Immediate12::from_signed(-1).unwrap();
-        for op in [
-            N1Op::Add,
-            N1Op::Sub,
-            N1Op::And,
-            N1Op::Or,
-            N1Op::Xor,
-            N1Op::Lda,
-            N1Op::Sta,
-            N1Op::Bun,
-            N1Op::Bsa,
-            N1Op::Jpa,
-            N1Op::Jza,
-            N1Op::Jna,
-            N1Op::Jze,
-            N1Op::Isz,
-        ] {
+        for &op in N1_OPS {
             for indirect in [false, true] {
                 let x = Instruction::N1 {
                     op,
@@ -622,14 +662,7 @@ mod tests {
                 assert_eq!(decode(x.encode()), Ok(x));
             }
         }
-        for op in [
-            N2Op::Add,
-            N2Op::Sub,
-            N2Op::And,
-            N2Op::Or,
-            N2Op::Xor,
-            N2Op::Move,
-        ] {
+        for &op in N2_OPS {
             for indirect in [false, true] {
                 let x = Instruction::N2 {
                     op,
@@ -640,21 +673,11 @@ mod tests {
                 assert_eq!(decode(x.encode()), Ok(x));
             }
         }
-        for op in [
-            ImmediateOp::Add,
-            ImmediateOp::And,
-            ImmediateOp::Or,
-            ImmediateOp::Lda,
-        ] {
+        for &op in IMMEDIATE_OPS {
             let x = Instruction::Immediate { op, value: i };
             assert_eq!(decode(x.encode()), Ok(x));
         }
-        for op in [
-            MemoryImmediateOp::Add,
-            MemoryImmediateOp::And,
-            MemoryImmediateOp::Or,
-            MemoryImmediateOp::Sta,
-        ] {
+        for &op in MEMORY_IMMEDIATE_OPS {
             for indirect in [false, true] {
                 let x = Instruction::MemoryImmediate {
                     op,
@@ -665,37 +688,41 @@ mod tests {
                 assert_eq!(decode(x.encode()), Ok(x));
             }
         }
-        for op in [
-            NoOperandOp::Cla,
-            NoOperandOp::Cle,
-            NoOperandOp::Cma,
-            NoOperandOp::Cme,
-            NoOperandOp::Cir,
-            NoOperandOp::Cil,
-            NoOperandOp::Inc,
-            NoOperandOp::Spa,
-            NoOperandOp::Sza,
-            NoOperandOp::Sna,
-            NoOperandOp::Sze,
-            NoOperandOp::Inp,
-            NoOperandOp::Out,
-            NoOperandOp::Ski,
-            NoOperandOp::Sko,
-            NoOperandOp::Ion,
-            NoOperandOp::Iof,
-            NoOperandOp::Sio,
-            NoOperandOp::Pio,
-            NoOperandOp::Imk,
-            NoOperandOp::Hlt,
-        ] {
+        for &op in NO_OPERAND_OPS {
             let x = Instruction::NoOperand(op);
             assert_eq!(decode(x.encode()), Ok(x));
         }
     }
     #[test]
+    fn mnemonic_round_trip_uses_isa_registry() {
+        for &op in N1_OPS {
+            assert_eq!(op.to_string().parse::<N1Op>(), Ok(op));
+        }
+        for &op in N2_OPS {
+            assert_eq!(op.to_string().parse::<N2Op>(), Ok(op));
+        }
+        for &op in IMMEDIATE_OPS {
+            assert_eq!(op.to_string().parse::<ImmediateOp>(), Ok(op));
+        }
+        for &op in MEMORY_IMMEDIATE_OPS {
+            assert_eq!(op.to_string().parse::<MemoryImmediateOp>(), Ok(op));
+        }
+        for &op in NO_OPERAND_OPS {
+            assert_eq!(op.to_string().parse::<NoOperandOp>(), Ok(op));
+        }
+    }
+    #[test]
     fn immediate_sign_extension() {
+        assert_eq!(Immediate12::from_raw(0x000).unwrap().as_i32(), 0);
+        assert_eq!(Immediate12::from_raw(0x7ff).unwrap().as_i32(), 2047);
         assert_eq!(Immediate12::from_raw(0x800).unwrap().as_i32(), -2048);
         assert_eq!(Immediate12::from_raw(0xfff).unwrap().as_i32(), -1);
+    }
+    #[test]
+    fn address_boundaries() {
+        assert_eq!(Address::new(0x000).unwrap().get(), 0x000);
+        assert_eq!(Address::new(0xfff).unwrap().get(), 0xfff);
+        assert!(Address::new(0x1000).is_err());
     }
     #[test]
     fn rejects_reserved_bits() {

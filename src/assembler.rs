@@ -376,7 +376,9 @@ fn resolve_instruction(
         if indirect {
             return Err(err(line, AsmErrorKind::Syntax("unexpected I".into())));
         }
-        let op = no_operand(m).ok_or_else(|| err(line, AsmErrorKind::UnknownMnemonic(m.into())))?;
+        let op = m
+            .parse::<NoOperandOp>()
+            .map_err(|_| err(line, AsmErrorKind::UnknownMnemonic(m.into())))?;
         return Ok(Instruction::NoOperand(op));
     }
     if args.len() == 1 {
@@ -389,7 +391,7 @@ fn resolve_instruction(
                     AsmErrorKind::Syntax("immediate instruction cannot be indirect".into()),
                 ));
             }
-            let op = immediate_op(m).ok_or_else(|| {
+            let op = m.parse::<ImmediateOp>().map_err(|_| {
                 err(
                     line,
                     AsmErrorKind::Syntax(format!("{m} does not accept an immediate operand")),
@@ -400,7 +402,7 @@ fn resolve_instruction(
                 value: parse_immediate(&args[0], line)?,
             });
         }
-        let op = n1_op(m).ok_or_else(|| {
+        let op = m.parse::<N1Op>().map_err(|_| {
             err(
                 line,
                 AsmErrorKind::Syntax(format!("{m} does not accept one address operand")),
@@ -414,7 +416,7 @@ fn resolve_instruction(
     }
     if args.len() == 2 {
         if looks_number(&args[1]) {
-            let op = memory_immediate_op(m).ok_or_else(|| {
+            let op = m.parse::<MemoryImmediateOp>().map_err(|_| {
                 err(
                     line,
                     AsmErrorKind::Syntax(format!("{m} does not accept address + immediate")),
@@ -427,7 +429,7 @@ fn resolve_instruction(
                 indirect,
             });
         }
-        let op = n2_op(m).ok_or_else(|| {
+        let op = m.parse::<N2Op>().map_err(|_| {
             err(
                 line,
                 AsmErrorKind::Syntax(format!("{m} does not accept two address operands")),
@@ -492,81 +494,6 @@ fn parse_immediate(s: &str, line: usize) -> Result<Immediate12, AsmError> {
             .map_err(|_| err(line, AsmErrorKind::ImmediateOutOfRange(v)))
     }
 }
-fn n1_op(s: &str) -> Option<N1Op> {
-    Some(match s {
-        "ADD" => N1Op::Add,
-        "SUB" => N1Op::Sub,
-        "AND" => N1Op::And,
-        "OR" => N1Op::Or,
-        "XOR" => N1Op::Xor,
-        "LDA" => N1Op::Lda,
-        "STA" => N1Op::Sta,
-        "BUN" => N1Op::Bun,
-        "BSA" => N1Op::Bsa,
-        "JPA" => N1Op::Jpa,
-        "JZA" => N1Op::Jza,
-        "JNA" => N1Op::Jna,
-        "JZE" => N1Op::Jze,
-        "ISZ" => N1Op::Isz,
-        _ => return None,
-    })
-}
-fn n2_op(s: &str) -> Option<N2Op> {
-    Some(match s {
-        "ADD" => N2Op::Add,
-        "SUB" => N2Op::Sub,
-        "AND" => N2Op::And,
-        "OR" => N2Op::Or,
-        "XOR" => N2Op::Xor,
-        "MOVE" => N2Op::Move,
-        _ => return None,
-    })
-}
-fn immediate_op(s: &str) -> Option<ImmediateOp> {
-    Some(match s {
-        "ADD" => ImmediateOp::Add,
-        "AND" => ImmediateOp::And,
-        "OR" => ImmediateOp::Or,
-        "LDA" => ImmediateOp::Lda,
-        _ => return None,
-    })
-}
-fn memory_immediate_op(s: &str) -> Option<MemoryImmediateOp> {
-    Some(match s {
-        "ADD" => MemoryImmediateOp::Add,
-        "AND" => MemoryImmediateOp::And,
-        "OR" => MemoryImmediateOp::Or,
-        "STA" => MemoryImmediateOp::Sta,
-        _ => return None,
-    })
-}
-fn no_operand(s: &str) -> Option<NoOperandOp> {
-    Some(match s {
-        "CLA" => NoOperandOp::Cla,
-        "CLE" => NoOperandOp::Cle,
-        "CMA" => NoOperandOp::Cma,
-        "CME" => NoOperandOp::Cme,
-        "CIR" => NoOperandOp::Cir,
-        "CIL" => NoOperandOp::Cil,
-        "INC" => NoOperandOp::Inc,
-        "SPA" => NoOperandOp::Spa,
-        "SZA" => NoOperandOp::Sza,
-        "SNA" => NoOperandOp::Sna,
-        "SZE" => NoOperandOp::Sze,
-        "INP" => NoOperandOp::Inp,
-        "OUT" => NoOperandOp::Out,
-        "SKI" => NoOperandOp::Ski,
-        "SKO" => NoOperandOp::Sko,
-        "ION" => NoOperandOp::Ion,
-        "IOF" => NoOperandOp::Iof,
-        "SIO" => NoOperandOp::Sio,
-        "PIO" => NoOperandOp::Pio,
-        "IMK" => NoOperandOp::Imk,
-        "HLT" => NoOperandOp::Hlt,
-        _ => return None,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -609,5 +536,45 @@ mod tests {
         let s="ORG 010\nA, HEX 1\nB, HEX 2\nADD A\nADD A I\nADD A B\nMOVE A B I\nLDA -1\nSTA A 0xfff I\nCLA\nEND";
         let r = Assembler::new().assemble(s).unwrap();
         assert_eq!(r.image.cells.len(), 9);
+    }
+    #[test]
+    fn backward_reference_resolves() {
+        let result = Assembler::new()
+            .assemble("VALUE, HEX 2a\nLDA VALUE\nEND")
+            .unwrap();
+        assert_eq!(result.image.cells[1].word, 0x0002_0000);
+    }
+    #[test]
+    fn undefined_symbol_is_reported() {
+        let errors = Assembler::new().assemble("LDA MISSING\nEND").unwrap_err();
+        assert!(errors.0.iter().any(
+            |error| matches!(&error.kind, AsmErrorKind::UndefinedSymbol(name) if name == "MISSING")
+        ));
+    }
+    #[test]
+    fn org_overlap_depends_on_compatibility_mode() {
+        let source = "ORG 010\nHEX 1\nORG 010\nHEX 2\nEND";
+        let strict = Assembler::new().assemble(source).unwrap_err();
+        assert!(strict
+            .0
+            .iter()
+            .any(|error| matches!(error.kind, AsmErrorKind::OverlappingAddress(_))));
+
+        let legacy = Assembler::new()
+            .compatibility(CompatibilityMode::Legacy)
+            .assemble(source)
+            .unwrap();
+        assert_eq!(legacy.image.cells.len(), 2);
+        assert_eq!(legacy.image.cells[0].address, legacy.image.cells[1].address);
+    }
+    #[test]
+    fn data_directive_boundaries() {
+        let result = Assembler::new()
+            .assemble(
+                "MAXHEX, HEX ffffffff\nMINDEC, DEC -2147483648\nMAXDEC, DEC 2147483647\nUNDER, CHR _\nEND",
+            )
+            .unwrap();
+        let words: Vec<_> = result.image.cells.iter().map(|cell| cell.word).collect();
+        assert_eq!(words, [0xffff_ffff, 0x8000_0000, 0x7fff_ffff, 0x5f]);
     }
 }
