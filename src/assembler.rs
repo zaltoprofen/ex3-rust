@@ -502,8 +502,8 @@ mod tests {
         let s="ORG 010\nSTART, LDA COUNT\n ADD 1\n STA COUNT\n JZA ZERO\n BUN START\nZERO, HLT\nCOUNT, DEC -1\nEND\n";
         let r = Assembler::new().assemble(s).unwrap();
         assert_eq!(r.symbols["START"].get(), 0x10);
-        assert_eq!(r.image.cells[0].word, 0x00020016);
-        assert_eq!(r.image.cells[1].word, 0xc1000001);
+        assert_eq!(r.image.cells[0].word, 0x0500_0016);
+        assert_eq!(r.image.cells[1].word, 0x8000_0001);
         assert_eq!(r.image.cells.last().unwrap().word, 0xffff_ffff);
     }
     #[test]
@@ -542,7 +542,7 @@ mod tests {
         let result = Assembler::new()
             .assemble("VALUE, HEX 2a\nLDA VALUE\nEND")
             .unwrap();
-        assert_eq!(result.image.cells[1].word, 0x0002_0000);
+        assert_eq!(result.image.cells[1].word, 0x0500_0000);
     }
     #[test]
     fn undefined_symbol_is_reported() {

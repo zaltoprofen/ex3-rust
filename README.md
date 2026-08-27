@@ -2,6 +2,12 @@
 
 EX3 32-bit ISA のリファレンス・アセンブラ、エミュレータ、デバッガです。仕様書に基づき、命令の encode/decode、2パスシンボル解決、`.mem` / `.prb`、I/O、割り込みを実装しています。
 
+## Opcode layout
+
+命令語は `format[31:29] + opcode[28:24] + payload[23:0]` の新形式を使用します。同じmnemonicは、対応するオペランド形式間で共通opcodeを持ちます。間接アドレッシングは独立bitではなくformatに含まれます。
+
+この変更はアセンブリソース互換ですが、旧32bit形式との機械語互換性はありません。旧`.mem`、ROM初期化データ、ハードコードされた命令語は、現在のアセンブラで再生成してください。decoderは旧形式を自動判別しません。
+
 ```sh
 cargo build --release
 cargo test
@@ -14,7 +20,7 @@ cargo run -- check program.asm
 cargo run -- run program.asm --max-steps 100000 --trace
 cargo run -- run program.asm --compat legacy --io legacy --seed 1234
 cargo run -- debug program.mem
-cargo run -- disasm --word 0xc8000001
+cargo run -- disasm --word 0x85000001
 ```
 
 ## 互換モード

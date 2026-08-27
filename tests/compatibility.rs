@@ -11,7 +11,7 @@ fn sample_golden_image_and_execution() {
     let assembled = Assembler::new().assemble(source).unwrap();
     assert_eq!(
         format_mem(&assembled.image),
-        "@010 00020016\n@011 c1000001\n@012 00040016\n@013 00400015\n@014 00080010\n@015 80100000\n@016 ffffffff\n"
+        "@010 05000016\n@011 80000001\n@012 06000016\n@013 0c000015\n@014 08000010\n@015 f4000000\n@016 ffffffff\n"
     );
     assert_eq!(format_probe(&assembled.image), "0016ffff\nf0000000\n");
 
