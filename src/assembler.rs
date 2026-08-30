@@ -1,14 +1,8 @@
-//! EX3ソースをメモリイメージへ変換する2パスアセンブラ。
-//!
-//! パーサはラベルを未解決の文字列として保持する。第1パスで全ラベルの
-//! アドレスを収集し、第2パスで命令を解決するため、前方参照も利用できる。
+//! Two-pass assembler for EX3 v3.0.
 
-use crate::{
-    isa::{
-        Address, Immediate12, ImmediateOp, Instruction, MemoryImmediateOp, N1Op, N2Op, NoOperandOp,
-        Word,
-    },
-    CompatibilityMode,
+use crate::isa::{
+    Address, BranchOp, Immediate16, ImmediateOp, Instruction, MemoryOp, SpRelativeOp, SystemOp,
+    Word,
 };
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -16,13 +10,11 @@ use std::{
     fmt,
 };
 
-/// アセンブリ診断のソース位置（1始まり）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Span {
     pub line: usize,
     pub column: usize,
 }
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AsmErrorKind {
     MissingEnd,
@@ -36,13 +28,11 @@ pub enum AsmErrorKind {
     InvalidNumber(String),
     OverlappingAddress(Address),
 }
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AsmError {
     pub span: Span,
     pub kind: AsmErrorKind,
 }
-
 impl fmt::Display for AsmError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}:{}: ", self.span.line, self.span.column)?;
@@ -63,37 +53,33 @@ impl fmt::Display for AsmError {
     }
 }
 impl Error for AsmError {}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AsmErrors(pub Vec<AsmError>);
 impl fmt::Display for AsmErrors {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (i, error) in self.0.iter().enumerate() {
+        for (i, e) in self.0.iter().enumerate() {
             if i != 0 {
                 writeln!(f)?;
             }
-            write!(f, "{error}")?;
+            write!(f, "{e}")?;
         }
         Ok(())
     }
 }
 impl Error for AsmErrors {}
 
-/// 出力セルの由来。`.prb`生成時にデータセルだけを選ぶために使う。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CellKind {
     Instruction,
     Data,
     Symbol,
 }
-/// アセンブル結果の1ワード。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MemoryCell {
     pub address: Address,
     pub word: Word,
     pub kind: CellKind,
 }
-/// アドレス順ではなく、ソース上で生成された順序を保持するメモリイメージ。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MemoryImage {
     pub cells: Vec<MemoryCell>,
@@ -115,6 +101,14 @@ enum Unresolved {
     Chr(String),
     Sym(String),
 }
+impl Unresolved {
+    fn words(&self) -> u32 {
+        match self {
+            Self::Instruction { mnemonic, .. } if mnemonic == "PUSH" || mnemonic == "POP" => 2,
+            _ => 1,
+        }
+    }
+}
 #[derive(Clone, Debug)]
 struct Line {
     line: usize,
@@ -124,9 +118,7 @@ struct Line {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct Assembler {
-    mode: CompatibilityMode,
-}
+pub struct Assembler;
 impl Default for Assembler {
     fn default() -> Self {
         Self::new()
@@ -134,32 +126,18 @@ impl Default for Assembler {
 }
 impl Assembler {
     pub const fn new() -> Self {
-        Self {
-            mode: CompatibilityMode::Strict,
-        }
+        Self
     }
-    pub const fn compatibility(mut self, mode: CompatibilityMode) -> Self {
-        self.mode = mode;
-        self
-    }
-
-    /// ソース全体を解析し、シンボル表とメモリイメージを生成する。
     pub fn assemble(&self, source: &str) -> Result<AssemblyResult, AsmErrors> {
         let lines = parse(source)?;
         let mut errors = Vec::new();
         let mut symbols = BTreeMap::new();
-        let mut lc: u32 = 0;
-
-        // Pass 1: ORGを反映しながらlocation counterを進め、ラベルを収集する。
-        // この段階では命令オペランドを解決しないため、前方参照が可能になる。
+        let mut lc = 0u32;
         for line in &lines {
             if let Some(org) = &line.org {
-                match parse_hex(org).filter(|v| *v <= 0xfff) {
-                    Some(v) => lc = v,
-                    None => errors.push(err(
-                        line.line,
-                        AsmErrorKind::AddressOutOfRange(parse_hex(org).unwrap_or(u32::MAX)),
-                    )),
+                match parse_org(org) {
+                    Ok(v) => lc = v as u32,
+                    Err(k) => errors.push(err(line.line, k)),
                 }
             }
             for label in &line.labels {
@@ -167,57 +145,60 @@ impl Assembler {
                     errors.push(err(
                         line.line,
                         AsmErrorKind::Syntax(format!("invalid label `{label}`")),
-                    ));
+                    ))
                 } else if symbols.contains_key(label) {
-                    errors.push(err(line.line, AsmErrorKind::DuplicateLabel(label.clone())));
-                } else if lc > 0xfff {
-                    errors.push(err(line.line, AsmErrorKind::AddressOutOfRange(lc)));
+                    errors.push(err(line.line, AsmErrorKind::DuplicateLabel(label.clone())))
+                } else if lc > 0xffff {
+                    errors.push(err(line.line, AsmErrorKind::AddressOutOfRange(lc)))
                 } else {
-                    symbols.insert(label.clone(), Address::new(lc as u16).expect("checked"));
+                    symbols.insert(label.clone(), Address::new(lc as u16).unwrap());
                 }
             }
-            if line.statement.is_some() {
-                lc += 1;
+            if let Some(s) = &line.statement {
+                lc = lc.saturating_add(s.words());
             }
         }
         if !errors.is_empty() {
             return Err(AsmErrors(errors));
         }
-
-        // Pass 2で何度も参照するため、所有済みシンボル表から借用lookupを作る。
         let lookup: HashMap<_, _> = symbols.iter().map(|(k, v)| (k.as_str(), *v)).collect();
         let mut image = MemoryImage::default();
         let mut used = HashSet::new();
         lc = 0;
-
-        // Pass 2: ラベル参照をAddressへ変換し、命令をencodeする。
         for line in &lines {
             if let Some(org) = &line.org {
-                lc = parse_hex(org).expect("pass 1 validated");
+                lc = parse_org(org).expect("pass 1") as u32;
             }
             let Some(statement) = &line.statement else {
                 continue;
             };
-            if lc > 0xfff {
-                errors.push(err(line.line, AsmErrorKind::AddressOutOfRange(lc)));
-                lc += 1;
-                continue;
-            }
-            let address = Address::new(lc as u16).expect("checked");
-            if self.mode == CompatibilityMode::Strict && !used.insert(address) {
-                errors.push(err(line.line, AsmErrorKind::OverlappingAddress(address)));
-                lc += 1;
-                continue;
-            }
             match resolve(statement, &lookup, line.line) {
-                Ok((word, kind)) => image.cells.push(MemoryCell {
-                    address,
-                    word,
-                    kind,
-                }),
-                Err(e) => errors.push(e),
+                Ok(words) => {
+                    for (word, kind) in words {
+                        if lc > 0xffff {
+                            errors.push(err(line.line, AsmErrorKind::AddressOutOfRange(lc)));
+                            lc += 1;
+                            continue;
+                        }
+                        let address = Address::new(lc as u16).unwrap();
+                        if !used.insert(address) {
+                            errors.push(err(line.line, AsmErrorKind::OverlappingAddress(address)));
+                            lc += 1;
+                            continue;
+                        }
+                        image.cells.push(MemoryCell {
+                            address,
+                            word,
+                            kind,
+                        });
+                        lc += 1;
+                    }
+                }
+                Err(e) => {
+                    errors.push(e);
+                    lc = lc.saturating_add(statement.words());
+                }
             }
-            lc += 1;
         }
         if errors.is_empty() {
             Ok(AssemblyResult { image, symbols })
@@ -226,7 +207,6 @@ impl Assembler {
         }
     }
 }
-
 fn err(line: usize, kind: AsmErrorKind) -> AsmError {
     AsmError {
         span: Span { line, column: 1 },
@@ -240,8 +220,7 @@ fn parse(source: &str) -> Result<Vec<Line>, AsmErrors> {
     let mut ended = false;
     for (index, raw) in source.lines().enumerate() {
         let line_no = index + 1;
-        // `/`は旧Scala構文、`;`はRust版の拡張コメント構文。
-        let text = raw.split(['/', ';']).next().unwrap_or(raw).trim();
+        let text = raw.split([';', '/']).next().unwrap_or(raw).trim();
         if text.is_empty() {
             continue;
         }
@@ -253,15 +232,23 @@ fn parse(source: &str) -> Result<Vec<Line>, AsmErrors> {
             ended = true;
             continue;
         }
-        let mut rest = text;
-        let mut labels = Vec::new();
-        while let Some((before, after)) = rest.split_once(',') {
-            let candidate = before.trim();
+        let (mut rest, mut labels) = (text, Vec::new());
+        loop {
+            let colon = rest.find(':');
+            let comma = rest.find(',');
+            let split = match (colon, comma) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (Some(a), None) => Some(a),
+                (None, Some(b)) => Some(b),
+                (None, None) => None,
+            };
+            let Some(pos) = split else { break };
+            let candidate = rest[..pos].trim();
             if candidate.split_whitespace().count() != 1 {
                 break;
             }
             labels.push(candidate.to_string());
-            rest = after.trim_start();
+            rest = rest[pos + 1..].trim_start();
         }
         let tokens: Vec<String> = rest.split_whitespace().map(str::to_string).collect();
         let (org, statement) = if tokens.is_empty() {
@@ -270,7 +257,7 @@ fn parse(source: &str) -> Result<Vec<Line>, AsmErrors> {
             if tokens.len() != 2 {
                 errors.push(err(
                     line_no,
-                    AsmErrorKind::Syntax("ORG requires one hexadecimal address".into()),
+                    AsmErrorKind::Syntax("ORG requires one address".into()),
                 ));
                 (None, None)
             } else {
@@ -305,9 +292,7 @@ fn parse(source: &str) -> Result<Vec<Line>, AsmErrors> {
             statement,
         });
     }
-    if !ended {
-        errors.push(err(source.lines().count().max(1), AsmErrorKind::MissingEnd));
-    }
+    // END remains accepted but is optional in v3 source.
     if errors.is_empty() {
         Ok(result)
     } else {
@@ -319,38 +304,39 @@ fn resolve(
     stmt: &Unresolved,
     symbols: &HashMap<&str, Address>,
     line: usize,
-) -> Result<(Word, CellKind), AsmError> {
+) -> Result<Vec<(Word, CellKind)>, AsmError> {
     match stmt {
-        Unresolved::Hex(s) => parse_hex(s)
-            .ok_or_else(|| err(line, AsmErrorKind::InvalidNumber(s.clone())))
-            .map(|v| (v, CellKind::Data)),
+        Unresolved::Hex(s) => parse_hex_word(s)
+            .map(|v| vec![(v, CellKind::Data)])
+            .map_err(|k| err(line, k)),
         Unresolved::Dec(s) => s
             .parse::<i32>()
-            .map(|v| (v as u32, CellKind::Data))
+            .map(|v| vec![(v as u32, CellKind::Data)])
             .map_err(|_| err(line, AsmErrorKind::InvalidNumber(s.clone()))),
         Unresolved::Chr(s) => {
             let inner = if s.len() >= 2 && s.starts_with('\'') && s.ends_with('\'') {
                 &s[1..s.len() - 1]
             } else {
-                s.as_str()
+                s
             };
-            let mut chars = inner.chars();
-            let c = chars
-                .next()
-                .filter(|_| chars.next().is_none())
-                .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
-                .ok_or_else(|| {
-                    err(
-                        line,
-                        AsmErrorKind::Syntax("CHR requires one [_0-9a-zA-Z] character".into()),
-                    )
-                })?;
-            Ok((c as u32, CellKind::Data))
+            let mut cs = inner.chars();
+            let c = cs.next().filter(|_| cs.next().is_none()).ok_or_else(|| {
+                err(
+                    line,
+                    AsmErrorKind::Syntax("CHR requires one character".into()),
+                )
+            })?;
+            Ok(vec![(c as u32, CellKind::Data)])
         }
-        Unresolved::Sym(s) => symbol(symbols, s, line).map(|a| (a.get() as u32, CellKind::Symbol)),
+        Unresolved::Sym(s) => {
+            symbol_or_address(symbols, s, line).map(|a| vec![(a.get() as u32, CellKind::Symbol)])
+        }
         Unresolved::Instruction { mnemonic, operands } => {
-            resolve_instruction(mnemonic, operands, symbols, line)
-                .map(|i| (i.encode(), CellKind::Instruction))
+            resolve_instruction(mnemonic, operands, symbols, line).map(|xs| {
+                xs.into_iter()
+                    .map(|i| (i.encode(), CellKind::Instruction))
+                    .collect()
+            })
         }
     }
 }
@@ -360,98 +346,138 @@ fn resolve_instruction(
     o: &[String],
     symbols: &HashMap<&str, Address>,
     line: usize,
-) -> Result<Instruction, AsmError> {
-    // 旧文法では末尾の大文字Iだけが間接指定として予約されている。
-    let indirect = o.last().is_some_and(|s| s == "I");
-    let args = if indirect { &o[..o.len() - 1] } else { o };
-    if o.last()
-        .is_some_and(|s| s.eq_ignore_ascii_case("i") && s != "I")
-    {
+) -> Result<Vec<Instruction>, AsmError> {
+    if m == "PUSH" || m == "POP" {
+        if !o.is_empty() {
+            return Err(err(
+                line,
+                AsmErrorKind::Syntax(format!("{m} takes no operands")),
+            ));
+        }
+        let minus = Immediate16::from_raw(0xffff);
+        let zero = Immediate16::from_raw(0);
+        let plus = Immediate16::from_raw(1);
+        return Ok(if m == "PUSH" {
+            vec![
+                Instruction::Immediate {
+                    op: ImmediateOp::Adjsp,
+                    value: minus,
+                },
+                Instruction::SpRelative {
+                    op: SpRelativeOp::Stsp,
+                    offset: zero,
+                },
+            ]
+        } else {
+            vec![
+                Instruction::SpRelative {
+                    op: SpRelativeOp::Ldsp,
+                    offset: zero,
+                },
+                Instruction::Immediate {
+                    op: ImmediateOp::Adjsp,
+                    value: plus,
+                },
+            ]
+        });
+    }
+    if let Ok(op) = m.parse::<SystemOp>() {
+        if o.is_empty() {
+            return Ok(vec![Instruction::System(op)]);
+        }
+        return Err(err(
+            line,
+            AsmErrorKind::Syntax(format!("{m} takes no operands")),
+        ));
+    }
+    if o.len() != 1 && !(o.len() == 2 && o[1] == "I") {
+        return Err(err(
+            line,
+            AsmErrorKind::Syntax(format!("wrong operand count for {m}")),
+        ));
+    }
+    let indirect = o.len() == 2;
+    if o.len() == 2 && o[1] != "I" {
         return Err(err(
             line,
             AsmErrorKind::Syntax("indirect marker must be uppercase I".into()),
         ));
     }
-    if args.is_empty() {
+    let operand = &o[0];
+    if let Ok(op) = m.parse::<BranchOp>() {
         if indirect {
-            return Err(err(line, AsmErrorKind::Syntax("unexpected I".into())));
+            return Err(err(
+                line,
+                AsmErrorKind::Syntax("branches cannot be indirect".into()),
+            ));
         }
+        return Ok(vec![Instruction::Branch {
+            op,
+            target: symbol_or_address(symbols, operand, line)?,
+        }]);
+    }
+    if let Ok(op) = m.parse::<SpRelativeOp>() {
+        if indirect {
+            return Err(err(
+                line,
+                AsmErrorKind::Syntax("SP-relative instruction cannot be indirect".into()),
+            ));
+        }
+        return Ok(vec![Instruction::SpRelative {
+            op,
+            offset: parse_signed16(operand, line)?,
+        }]);
+    }
+    if matches!(m, "LDHI" | "LDLO" | "ADJSP") {
+        if indirect {
+            return Err(err(
+                line,
+                AsmErrorKind::Syntax("immediate instruction cannot be indirect".into()),
+            ));
+        }
+        let op = m.parse::<ImmediateOp>().unwrap();
+        let value = if matches!(op, ImmediateOp::Ldhi | ImmediateOp::Ldlo) {
+            parse_raw16(operand, line)?
+        } else {
+            parse_signed16(operand, line)?
+        };
+        return Ok(vec![Instruction::Immediate { op, value }]);
+    }
+    if indirect || !looks_number(operand) || operand.starts_with('@') || m == "STA" || m == "ISZ" {
         let op = m
-            .parse::<NoOperandOp>()
+            .parse::<MemoryOp>()
             .map_err(|_| err(line, AsmErrorKind::UnknownMnemonic(m.into())))?;
-        return Ok(Instruction::NoOperand(op));
-    }
-    if args.len() == 1 {
-        // `LDA 1`は即値、`LDA LABEL`はメモリ参照。数値アドレスは
-        // 意図的に導入せず、旧パーサの曖昧性解消規則を維持する。
-        if looks_number(&args[0]) {
-            if indirect {
-                return Err(err(
-                    line,
-                    AsmErrorKind::Syntax("immediate instruction cannot be indirect".into()),
-                ));
-            }
-            let op = m.parse::<ImmediateOp>().map_err(|_| {
-                err(
-                    line,
-                    AsmErrorKind::Syntax(format!("{m} does not accept an immediate operand")),
-                )
-            })?;
-            return Ok(Instruction::Immediate {
-                op,
-                value: parse_immediate(&args[0], line)?,
-            });
-        }
-        let op = m.parse::<N1Op>().map_err(|_| {
-            err(
-                line,
-                AsmErrorKind::Syntax(format!("{m} does not accept one address operand")),
-            )
-        })?;
-        return Ok(Instruction::N1 {
+        return Ok(vec![Instruction::Memory {
             op,
-            operand: symbol(symbols, &args[0], line)?,
+            address: symbol_or_address(symbols, operand.trim_start_matches('@'), line)?,
             indirect,
-        });
+        }]);
     }
-    if args.len() == 2 {
-        if looks_number(&args[1]) {
-            let op = m.parse::<MemoryImmediateOp>().map_err(|_| {
-                err(
-                    line,
-                    AsmErrorKind::Syntax(format!("{m} does not accept address + immediate")),
-                )
-            })?;
-            return Ok(Instruction::MemoryImmediate {
-                op,
-                operand: symbol(symbols, &args[0], line)?,
-                value: parse_immediate(&args[1], line)?,
-                indirect,
-            });
-        }
-        let op = m.parse::<N2Op>().map_err(|_| {
-            err(
-                line,
-                AsmErrorKind::Syntax(format!("{m} does not accept two address operands")),
-            )
-        })?;
-        return Ok(Instruction::N2 {
-            op,
-            operand1: symbol(symbols, &args[0], line)?,
-            operand2: symbol(symbols, &args[1], line)?,
-            indirect,
-        });
-    }
-    Err(err(
-        line,
-        AsmErrorKind::Syntax(format!("wrong operand count for {m}")),
-    ))
+    let op = m
+        .parse::<ImmediateOp>()
+        .map_err(|_| err(line, AsmErrorKind::UnknownMnemonic(m.into())))?;
+    let value = if matches!(op, ImmediateOp::And | ImmediateOp::Or | ImmediateOp::Xor) {
+        parse_raw16(operand, line)?
+    } else {
+        parse_signed16(operand, line)?
+    };
+    Ok(vec![Instruction::Immediate { op, value }])
 }
 
-fn symbol(map: &HashMap<&str, Address>, name: &str, line: usize) -> Result<Address, AsmError> {
-    map.get(name)
-        .copied()
-        .ok_or_else(|| err(line, AsmErrorKind::UndefinedSymbol(name.into())))
+fn symbol_or_address(
+    map: &HashMap<&str, Address>,
+    name: &str,
+    line: usize,
+) -> Result<Address, AsmError> {
+    if looks_number(name) {
+        parse_address_number(name)
+            .map(|v| Address::new(v).unwrap())
+            .map_err(|k| err(line, k))
+    } else {
+        map.get(name)
+            .copied()
+            .ok_or_else(|| err(line, AsmErrorKind::UndefinedSymbol(name.into())))
+    }
 }
 fn valid_identifier(s: &str) -> bool {
     let mut c = s.chars();
@@ -459,122 +485,101 @@ fn valid_identifier(s: &str) -> bool {
         .is_some_and(|x| x == '_' || x.is_ascii_alphabetic())
         && c.all(|x| x == '_' || x.is_ascii_alphanumeric())
 }
-fn parse_hex(s: &str) -> Option<u32> {
-    u32::from_str_radix(
-        s.strip_prefix("0x")
-            .or_else(|| s.strip_prefix("0X"))
-            .unwrap_or(s),
-        16,
-    )
-    .ok()
-}
 fn looks_number(s: &str) -> bool {
+    let s = s.strip_prefix('@').unwrap_or(s);
     s.starts_with("0x")
         || s.starts_with("0X")
         || s.starts_with('+')
         || s.starts_with('-')
         || s.chars().next().is_some_and(|c| c.is_ascii_digit())
 }
-fn parse_immediate(s: &str, line: usize) -> Result<Immediate12, AsmError> {
-    if s.starts_with("0x") || s.starts_with("0X") {
-        let v = parse_hex(s).ok_or_else(|| err(line, AsmErrorKind::InvalidNumber(s.into())))?;
-        if v > 0xfff {
-            return Err(err(line, AsmErrorKind::ImmediateOutOfRange(v as i64)));
-        }
-        Immediate12::from_raw(v as u16)
-            .map_err(|_| err(line, AsmErrorKind::ImmediateOutOfRange(v as i64)))
+fn parse_i64(s: &str) -> Result<i64, AsmErrorKind> {
+    if let Some(x) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        i64::from_str_radix(x, 16).map_err(|_| AsmErrorKind::InvalidNumber(s.into()))
     } else {
-        let v = s
-            .parse::<i64>()
-            .map_err(|_| err(line, AsmErrorKind::InvalidNumber(s.into())))?;
-        if !(-2048..=2047).contains(&v) {
-            return Err(err(line, AsmErrorKind::ImmediateOutOfRange(v)));
-        }
-        Immediate12::from_signed(v as i32)
-            .map_err(|_| err(line, AsmErrorKind::ImmediateOutOfRange(v)))
+        s.parse::<i64>()
+            .map_err(|_| AsmErrorKind::InvalidNumber(s.into()))
     }
 }
+fn parse_address_number(s: &str) -> Result<u16, AsmErrorKind> {
+    let v = parse_i64(s)?;
+    if (0..=0xffff).contains(&v) {
+        Ok(v as u16)
+    } else {
+        Err(AsmErrorKind::AddressOutOfRange(v.max(0) as u32))
+    }
+}
+fn parse_org(s: &str) -> Result<u16, AsmErrorKind> {
+    let digits = s
+        .strip_prefix("0x")
+        .or_else(|| s.strip_prefix("0X"))
+        .unwrap_or(s);
+    let value =
+        u32::from_str_radix(digits, 16).map_err(|_| AsmErrorKind::InvalidNumber(s.into()))?;
+    if value <= 0xffff {
+        Ok(value as u16)
+    } else {
+        Err(AsmErrorKind::AddressOutOfRange(value))
+    }
+}
+fn parse_signed16(s: &str, line: usize) -> Result<Immediate16, AsmError> {
+    let v = parse_i64(s).map_err(|k| err(line, k))?;
+    let hexadecimal = s.starts_with("0x") || s.starts_with("0X");
+    if (-32768..=32767).contains(&v) || (hexadecimal && v <= 0xffff) {
+        Ok(Immediate16::from_raw(v as u16))
+    } else {
+        Err(err(line, AsmErrorKind::ImmediateOutOfRange(v)))
+    }
+}
+fn parse_raw16(s: &str, line: usize) -> Result<Immediate16, AsmError> {
+    let v = parse_i64(s).map_err(|k| err(line, k))?;
+    if (-32768..=65535).contains(&v) {
+        Ok(Immediate16::from_raw(v as u16))
+    } else {
+        Err(err(line, AsmErrorKind::ImmediateOutOfRange(v)))
+    }
+}
+fn parse_hex_word(s: &str) -> Result<u32, AsmErrorKind> {
+    let x = s
+        .strip_prefix("0x")
+        .or_else(|| s.strip_prefix("0X"))
+        .unwrap_or(s);
+    u32::from_str_radix(x, 16).map_err(|_| AsmErrorKind::InvalidNumber(s.into()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
-    fn sample_and_outputs() {
-        let s="ORG 010\nSTART, LDA COUNT\n ADD 1\n STA COUNT\n JZA ZERO\n BUN START\nZERO, HLT\nCOUNT, DEC -1\nEND\n";
+    fn assembles_all_formats_and_pseudos() {
+        let s="ORG 0x0000\nJMP START\nORG 0x0010\nSTART: LDA -1\nADD VALUE\nCMP 1\nBEQ DONE\nPUSH\nPOP\nDONE: HLT\nVALUE: HEX 00000001\nEND\n";
         let r = Assembler::new().assemble(s).unwrap();
         assert_eq!(r.symbols["START"].get(), 0x10);
-        assert_eq!(r.image.cells[0].word, 0x0500_0016);
-        assert_eq!(r.image.cells[1].word, 0x8000_0001);
-        assert_eq!(r.image.cells.last().unwrap().word, 0xffff_ffff);
+        assert_eq!(r.image.cells.len(), 11);
+        assert_eq!(r.image.cells[0].word, 0x6000_0010);
+        assert_eq!(r.image.cells[1].word, 0x2500_ffff);
     }
     #[test]
-    fn forward_sym_and_multiple_labels() {
+    fn indirect_and_sp_relative() {
         let r = Assembler::new()
-            .assemble("A, B, SYM C\nC, HEX deadbeef\nEND")
+            .assemble("ORG 0x10\nP: SYM V\nV: HEX 2a\nLDA P I\nLDSP -2\nADJSP 3\nEND")
             .unwrap();
-        assert_eq!(r.symbols["A"], r.symbols["B"]);
-        assert_eq!(r.image.cells[0].word, 1);
+        assert_eq!(r.image.cells[2].word, 0x0501_0010);
+        assert_eq!(r.image.cells[3].word, 0x4500_fffe);
     }
     #[test]
-    fn aggregates_errors() {
+    fn org_uses_hexadecimal_address_syntax() {
+        let r = Assembler::new().assemble("ORG 0010\nHLT\nEND").unwrap();
+        assert_eq!(r.image.cells[0].address.get(), 0x0010);
+    }
+    #[test]
+    fn detects_overlap_and_duplicate() {
         let e = Assembler::new()
-            .assemble("A, LDA X\nA, BUN Y\nEND")
+            .assemble("ORG 10\nA: HLT\nORG 10\nA: HLT\nEND")
             .unwrap_err();
         assert!(e
             .0
             .iter()
-            .any(|e| matches!(e.kind, AsmErrorKind::DuplicateLabel(_))));
-    }
-    #[test]
-    fn missing_end() {
-        assert!(matches!(
-            Assembler::new().assemble("HLT").unwrap_err().0[0].kind,
-            AsmErrorKind::MissingEnd
-        ));
-    }
-    #[test]
-    fn all_formats() {
-        let s="ORG 010\nA, HEX 1\nB, HEX 2\nADD A\nADD A I\nADD A B\nMOVE A B I\nLDA -1\nSTA A 0xfff I\nCLA\nEND";
-        let r = Assembler::new().assemble(s).unwrap();
-        assert_eq!(r.image.cells.len(), 9);
-    }
-    #[test]
-    fn backward_reference_resolves() {
-        let result = Assembler::new()
-            .assemble("VALUE, HEX 2a\nLDA VALUE\nEND")
-            .unwrap();
-        assert_eq!(result.image.cells[1].word, 0x0500_0000);
-    }
-    #[test]
-    fn undefined_symbol_is_reported() {
-        let errors = Assembler::new().assemble("LDA MISSING\nEND").unwrap_err();
-        assert!(errors.0.iter().any(
-            |error| matches!(&error.kind, AsmErrorKind::UndefinedSymbol(name) if name == "MISSING")
-        ));
-    }
-    #[test]
-    fn org_overlap_depends_on_compatibility_mode() {
-        let source = "ORG 010\nHEX 1\nORG 010\nHEX 2\nEND";
-        let strict = Assembler::new().assemble(source).unwrap_err();
-        assert!(strict
-            .0
-            .iter()
-            .any(|error| matches!(error.kind, AsmErrorKind::OverlappingAddress(_))));
-
-        let legacy = Assembler::new()
-            .compatibility(CompatibilityMode::Legacy)
-            .assemble(source)
-            .unwrap();
-        assert_eq!(legacy.image.cells.len(), 2);
-        assert_eq!(legacy.image.cells[0].address, legacy.image.cells[1].address);
-    }
-    #[test]
-    fn data_directive_boundaries() {
-        let result = Assembler::new()
-            .assemble(
-                "MAXHEX, HEX ffffffff\nMINDEC, DEC -2147483648\nMAXDEC, DEC 2147483647\nUNDER, CHR _\nEND",
-            )
-            .unwrap();
-        let words: Vec<_> = result.image.cells.iter().map(|cell| cell.word).collect();
-        assert_eq!(words, [0xffff_ffff, 0x8000_0000, 0x7fff_ffff, 0x5f]);
+            .any(|x| matches!(x.kind, AsmErrorKind::DuplicateLabel(_))));
     }
 }

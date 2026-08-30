@@ -1,49 +1,48 @@
-//! EX3 CPU、メモリ、周辺I/Oの実行モデル。
-//!
-//! CPUコアは端末やファイルへ直接アクセスせず、[`Memory`] と [`IoBus`] を
-//! 通じて外部状態を操作する。この分離により、テストでは決定論的なI/Oを
-//! 使用し、CLIでは別の実装へ差し替えられる。
+//! EX3 v3.0 CPU, unified memory, and peripheral interfaces.
 
 use crate::{
     assembler::MemoryImage,
     isa::{
-        decode, Address, DecodeError, ImmediateOp, Instruction, MemoryImmediateOp, N1Op, N2Op,
-        NoOperandOp, Word, MEMORY_SIZE,
+        decode, Address, BranchOp, DecodeError, ImmediateOp, Instruction, MemoryOp, SpRelativeOp,
+        SystemOp, Word, MEMORY_SIZE,
     },
-    CompatibilityMode,
 };
 use std::{collections::VecDeque, error::Error, fmt};
 
-/// CPUがアクセスするワード単位メモリ。
+pub const PSR_V: Word = 1 << 0;
+pub const PSR_C: Word = 1 << 1;
+pub const PSR_Z: Word = 1 << 2;
+pub const PSR_N: Word = 1 << 3;
+pub const PSR_IEN: Word = 1 << 4;
+pub const PSR_MASK: Word = PSR_V | PSR_C | PSR_Z | PSR_N | PSR_IEN;
+
 pub trait Memory {
     fn read(&self, addr: Address) -> Word;
     fn write(&mut self, addr: Address, value: Word);
 }
-
-/// EX3の4096ワードを固定長配列で保持する標準メモリ。
 #[derive(Clone)]
 pub struct ArrayMemory {
-    words: [Word; MEMORY_SIZE],
+    words: Box<[Word; MEMORY_SIZE]>,
 }
 impl Default for ArrayMemory {
     fn default() -> Self {
         Self {
-            words: [0; MEMORY_SIZE],
+            words: Box::new([0; MEMORY_SIZE]),
         }
     }
 }
 impl ArrayMemory {
     pub fn from_image(image: &MemoryImage) -> Self {
         let mut m = Self::default();
-        for cell in &image.cells {
-            m.write(cell.address, cell.word);
+        for c in &image.cells {
+            m.write(c.address, c.word)
         }
         m
     }
     pub fn from_cells(cells: &[(Address, Word)]) -> Self {
         let mut m = Self::default();
         for &(a, w) in cells {
-            m.write(a, w);
+            m.write(a, w)
         }
         m
     }
@@ -52,29 +51,24 @@ impl ArrayMemory {
     }
 }
 impl Memory for ArrayMemory {
-    fn read(&self, addr: Address) -> Word {
-        self.words[addr.get() as usize]
+    fn read(&self, a: Address) -> Word {
+        self.words[a.get() as usize]
     }
-    fn write(&mut self, addr: Address, value: Word) {
-        self.words[addr.get() as usize] = value
+    fn write(&mut self, a: Address, v: Word) {
+        self.words[a.get() as usize] = v
     }
 }
 
-/// I/O命令が選択できるポート種別。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IoKind {
     Serial,
     Parallel,
 }
-
-/// Information needed by peripherals whose timing depends on CPU I/O state.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct IoTickContext {
     pub interrupt_enabled: bool,
     pub interrupt_mask: u8,
 }
-
-/// CPUコアから周辺機器を分離するためのI/Oインターフェース。
 pub trait IoBus {
     fn tick(&mut self, _context: IoTickContext) {}
     fn interrupt_pending(&self) -> bool {
@@ -85,8 +79,6 @@ pub trait IoBus {
     fn input_ready(&self, kind: IoKind) -> bool;
     fn output_ready(&self, kind: IoKind) -> bool;
 }
-
-/// 入力を持たず、出力を破棄する非対話実行用I/O。
 #[derive(Default)]
 pub struct NullIoBus;
 impl IoBus for NullIoBus {
@@ -102,7 +94,6 @@ impl IoBus for NullIoBus {
     }
 }
 
-/// キューへ投入した入力を即時に読み出せる、テスト向けI/O。
 #[derive(Clone, Debug)]
 pub struct DeterministicIoBus {
     serial_input: VecDeque<u8>,
@@ -127,14 +118,14 @@ impl Default for DeterministicIoBus {
     }
 }
 impl DeterministicIoBus {
-    pub fn push_input(&mut self, kind: IoKind, value: u8) {
-        match kind {
-            IoKind::Serial => self.serial_input.push_back(value),
-            IoKind::Parallel => self.parallel_input.push_back(value),
+    pub fn push_input(&mut self, k: IoKind, v: u8) {
+        match k {
+            IoKind::Serial => self.serial_input.push_back(v),
+            IoKind::Parallel => self.parallel_input.push_back(v),
         }
     }
-    pub fn output(&self, kind: IoKind) -> &[u8] {
-        match kind {
+    pub fn output(&self, k: IoKind) -> &[u8] {
+        match k {
             IoKind::Serial => &self.serial_output,
             IoKind::Parallel => &self.parallel_output,
         }
@@ -142,98 +133,81 @@ impl DeterministicIoBus {
     pub fn request_interrupt(&mut self) {
         self.force_interrupt = true
     }
+    pub fn clear_interrupt(&mut self) {
+        self.force_interrupt = false
+    }
 }
 impl IoBus for DeterministicIoBus {
-    fn tick(&mut self, _context: IoTickContext) {
+    fn tick(&mut self, _: IoTickContext) {
         self.serial_output_ready = true;
         self.parallel_output_ready = true
     }
     fn interrupt_pending(&self) -> bool {
         self.force_interrupt
     }
-    fn read_input(&mut self, kind: IoKind) -> Option<u8> {
-        match kind {
+    fn read_input(&mut self, k: IoKind) -> Option<u8> {
+        match k {
             IoKind::Serial => self.serial_input.pop_front(),
             IoKind::Parallel => self.parallel_input.pop_front(),
         }
     }
-    fn write_output(&mut self, kind: IoKind, value: u8) {
-        match kind {
+    fn write_output(&mut self, k: IoKind, v: u8) {
+        match k {
             IoKind::Serial => {
-                self.serial_output.push(value);
+                self.serial_output.push(v);
                 self.serial_output_ready = false
             }
             IoKind::Parallel => {
-                self.parallel_output.push(value);
+                self.parallel_output.push(v);
                 self.parallel_output_ready = false
             }
         }
     }
-    fn input_ready(&self, kind: IoKind) -> bool {
-        match kind {
+    fn input_ready(&self, k: IoKind) -> bool {
+        match k {
             IoKind::Serial => !self.serial_input.is_empty(),
             IoKind::Parallel => !self.parallel_input.is_empty(),
         }
     }
-    fn output_ready(&self, kind: IoKind) -> bool {
-        match kind {
+    fn output_ready(&self, k: IoKind) -> bool {
+        match k {
             IoKind::Serial => self.serial_output_ready,
             IoKind::Parallel => self.parallel_output_ready,
         }
     }
 }
 
-/// 旧シミュレータのタイミングを再現するseed指定可能なI/O。
-///
-/// 入力は1..=50 tick、出力は1 tickでreadyになる。legacy CPUモードでは、
-/// 旧実装と同様に割り込みが有効な間だけ周辺機器のtickが進む。
+/// Seeded peripheral model retained as a CLI I/O backend; CPU semantics are always v3.
 #[derive(Clone, Debug)]
 pub struct LegacyIoBus {
+    inner: DeterministicIoBus,
     rng: u64,
     serial_pending: VecDeque<u8>,
     parallel_pending: VecDeque<u8>,
-    serial_ready: Option<u8>,
-    parallel_ready: Option<u8>,
-    serial_input_delay: Option<u8>,
-    parallel_input_delay: Option<u8>,
-    serial_output_delay: Option<u8>,
-    parallel_output_delay: Option<u8>,
-    serial_output: Vec<u8>,
-    parallel_output: Vec<u8>,
-    serial_output_ready: bool,
-    parallel_output_ready: bool,
+    serial_delay: Option<u8>,
+    parallel_delay: Option<u8>,
 }
 impl LegacyIoBus {
     pub fn new(seed: u64) -> Self {
         Self {
+            inner: DeterministicIoBus::default(),
             rng: seed,
             serial_pending: VecDeque::new(),
             parallel_pending: VecDeque::new(),
-            serial_ready: None,
-            parallel_ready: None,
-            serial_input_delay: None,
-            parallel_input_delay: None,
-            serial_output_delay: None,
-            parallel_output_delay: None,
-            serial_output: Vec::new(),
-            parallel_output: Vec::new(),
-            serial_output_ready: false,
-            parallel_output_ready: false,
+            serial_delay: None,
+            parallel_delay: None,
         }
     }
-    pub fn push_input(&mut self, kind: IoKind, value: u8) {
-        match kind {
-            IoKind::Serial => self.serial_pending.push_back(value),
-            IoKind::Parallel => self.parallel_pending.push_back(value),
+    pub fn push_input(&mut self, k: IoKind, v: u8) {
+        match k {
+            IoKind::Serial => self.serial_pending.push_back(v),
+            IoKind::Parallel => self.parallel_pending.push_back(v),
         }
     }
-    pub fn output(&self, kind: IoKind) -> &[u8] {
-        match kind {
-            IoKind::Serial => &self.serial_output,
-            IoKind::Parallel => &self.parallel_output,
-        }
+    pub fn output(&self, k: IoKind) -> &[u8] {
+        self.inner.output(k)
     }
-    fn next_delay(&mut self) -> u8 {
+    fn delay(&mut self) -> u8 {
         self.rng = self.rng.wrapping_mul(6364136223846793005).wrapping_add(1);
         ((self.rng >> 32) % 50 + 1) as u8
     }
@@ -244,108 +218,78 @@ impl Default for LegacyIoBus {
     }
 }
 impl IoBus for LegacyIoBus {
-    fn tick(&mut self, context: IoTickContext) {
-        // The Scala controller executes only devices selected by a set mask bit.
-        if !context.interrupt_enabled {
-            return;
-        }
-
-        if context.interrupt_mask & 0x8 != 0
-            && self.serial_ready.is_none()
+    fn tick(&mut self, c: IoTickContext) {
+        self.inner.tick(c);
+        if c.interrupt_enabled
+            && c.interrupt_mask & 8 != 0
             && !self.serial_pending.is_empty()
+            && self.inner.serial_input.is_empty()
         {
-            match self.serial_input_delay {
-                None => self.serial_input_delay = Some(self.next_delay()),
-                Some(0) => {
-                    self.serial_ready = self.serial_pending.pop_front();
-                    self.serial_input_delay = None;
-                }
-                Some(delay) => self.serial_input_delay = Some(delay - 1),
-            }
+            let delay = self.delay();
+            advance_input(
+                &mut self.serial_delay,
+                &mut self.serial_pending,
+                &mut self.inner.serial_input,
+                delay,
+            )
         }
-        if context.interrupt_mask & 0x4 != 0 && !self.serial_output_ready {
-            advance_output(&mut self.serial_output_delay, &mut self.serial_output_ready);
-        }
-        if context.interrupt_mask & 0x2 != 0
-            && self.parallel_ready.is_none()
+        if c.interrupt_enabled
+            && c.interrupt_mask & 2 != 0
             && !self.parallel_pending.is_empty()
+            && self.inner.parallel_input.is_empty()
         {
-            match self.parallel_input_delay {
-                None => self.parallel_input_delay = Some(self.next_delay()),
-                Some(0) => {
-                    self.parallel_ready = self.parallel_pending.pop_front();
-                    self.parallel_input_delay = None;
-                }
-                Some(delay) => self.parallel_input_delay = Some(delay - 1),
-            }
-        }
-        if context.interrupt_mask & 0x1 != 0 && !self.parallel_output_ready {
-            advance_output(
-                &mut self.parallel_output_delay,
-                &mut self.parallel_output_ready,
-            );
+            let delay = self.delay();
+            advance_input(
+                &mut self.parallel_delay,
+                &mut self.parallel_pending,
+                &mut self.inner.parallel_input,
+                delay,
+            )
         }
     }
-    fn read_input(&mut self, kind: IoKind) -> Option<u8> {
-        match kind {
-            IoKind::Serial => self.serial_ready.take(),
-            IoKind::Parallel => self.parallel_ready.take(),
-        }
+    fn read_input(&mut self, k: IoKind) -> Option<u8> {
+        self.inner.read_input(k)
     }
-    fn write_output(&mut self, kind: IoKind, value: u8) {
-        match kind {
-            IoKind::Serial => {
-                self.serial_output.push(value);
-                self.serial_output_ready = false;
-                self.serial_output_delay = None;
-            }
-            IoKind::Parallel => {
-                self.parallel_output.push(value);
-                self.parallel_output_ready = false;
-                self.parallel_output_delay = None;
-            }
-        }
+    fn write_output(&mut self, k: IoKind, v: u8) {
+        self.inner.write_output(k, v)
     }
-    fn input_ready(&self, kind: IoKind) -> bool {
-        match kind {
-            IoKind::Serial => self.serial_ready.is_some(),
-            IoKind::Parallel => self.parallel_ready.is_some(),
-        }
+    fn input_ready(&self, k: IoKind) -> bool {
+        self.inner.input_ready(k)
     }
-    fn output_ready(&self, kind: IoKind) -> bool {
-        match kind {
-            IoKind::Serial => self.serial_output_ready,
-            IoKind::Parallel => self.parallel_output_ready,
-        }
+    fn output_ready(&self, k: IoKind) -> bool {
+        self.inner.output_ready(k)
     }
 }
-
-/// Advance the legacy output state machine by one enabled tick.
-fn advance_output(delay: &mut Option<u8>, ready: &mut bool) {
+fn advance_input(
+    delay: &mut Option<u8>,
+    pending: &mut VecDeque<u8>,
+    ready: &mut VecDeque<u8>,
+    new_delay: u8,
+) {
     match *delay {
-        None => *delay = Some(1),
+        None => *delay = Some(new_delay),
         Some(0) => {
-            *ready = true;
-            *delay = None;
+            if let Some(v) = pending.pop_front() {
+                ready.push_back(v)
+            }
+            *delay = None
         }
-        Some(remaining) => *delay = Some(remaining - 1),
+        Some(n) => *delay = Some(n - 1),
     }
 }
 
-/// CPU内部にあるI/O制御レジスタ。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct IoState {
     pub serial_selected: bool,
-    pub interrupt_enabled: bool,
     pub interrupt_mask: u8,
     pub input_register: u8,
 }
-/// デバッガやテストから観測できるCPUレジスタ群。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CpuState {
     pub pc: Address,
+    pub sp: Address,
     pub ac: Word,
-    pub e: bool,
+    pub psr: Word,
     pub halted: bool,
     pub interrupt_pending: bool,
     pub ir: Word,
@@ -355,8 +299,9 @@ impl Default for CpuState {
     fn default() -> Self {
         Self {
             pc: Address::RESET,
+            sp: Address::ZERO,
             ac: 0,
-            e: false,
+            psr: 0,
             halted: false,
             interrupt_pending: false,
             ir: 0,
@@ -364,8 +309,24 @@ impl Default for CpuState {
         }
     }
 }
+impl CpuState {
+    pub const fn negative(&self) -> bool {
+        self.psr & PSR_N != 0
+    }
+    pub const fn zero(&self) -> bool {
+        self.psr & PSR_Z != 0
+    }
+    pub const fn carry(&self) -> bool {
+        self.psr & PSR_C != 0
+    }
+    pub const fn overflow(&self) -> bool {
+        self.psr & PSR_V != 0
+    }
+    pub const fn interrupt_enabled(&self) -> bool {
+        self.psr & PSR_IEN != 0
+    }
+}
 
-/// 1回の[`Cpu::step`]がどの経路を通ったかを表す。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StepOutcome {
     Executed {
@@ -402,23 +363,20 @@ impl From<DecodeError> for CpuError {
     }
 }
 
-/// EX3 CPU本体。メモリとI/Oは所有せず、実行時に借用する。
 pub struct Cpu {
     state: CpuState,
     io: IoState,
-    mode: CompatibilityMode,
 }
 impl Default for Cpu {
     fn default() -> Self {
-        Self::new(CompatibilityMode::Strict)
+        Self::new()
     }
 }
 impl Cpu {
-    pub fn new(mode: CompatibilityMode) -> Self {
+    pub fn new() -> Self {
         Self {
             state: CpuState::default(),
             io: IoState::default(),
-            mode,
         }
     }
     pub fn reset(&mut self) {
@@ -434,7 +392,9 @@ impl Cpu {
     pub const fn io_state(&self) -> &IoState {
         &self.io
     }
-
+    pub fn io_state_mut(&mut self) -> &mut IoState {
+        &mut self.io
+    }
     pub fn step(
         &mut self,
         memory: &mut impl Memory,
@@ -443,43 +403,42 @@ impl Cpu {
         if self.state.halted {
             return Ok(StepOutcome::Halted);
         }
-
+        let ien = self.state.interrupt_enabled();
         io.tick(IoTickContext {
-            interrupt_enabled: self.io.interrupt_enabled,
+            interrupt_enabled: ien,
             interrupt_mask: self.io.interrupt_mask,
         });
-
-        let masked_interrupt = (self.io.interrupt_mask & 0x8 != 0
-            && io.input_ready(IoKind::Serial))
-            || (self.io.interrupt_mask & 0x4 != 0 && io.output_ready(IoKind::Serial))
-            || (self.io.interrupt_mask & 0x2 != 0 && io.input_ready(IoKind::Parallel))
+        let masked = (self.io.interrupt_mask & 8 != 0 && io.input_ready(IoKind::Serial))
+            || (self.io.interrupt_mask & 4 != 0 && io.output_ready(IoKind::Serial))
+            || (self.io.interrupt_mask & 2 != 0 && io.input_ready(IoKind::Parallel))
             || (self.io.interrupt_mask & 1 != 0 && io.output_ready(IoKind::Parallel));
-        self.state.interrupt_pending =
-            self.io.interrupt_enabled && (masked_interrupt || io.interrupt_pending());
-
-        // 割り込みentryは通常の命令fetchより先に行い、命令数に含めない。
-        // M[0]に復帰PCを保存し、固定vector 0x001へ分岐する。
+        self.state.interrupt_pending = ien && (masked || io.interrupt_pending());
         if self.state.interrupt_pending {
             self.state.interrupt_pending = false;
-            self.io.interrupt_enabled = false;
-            memory.write(Address::ZERO, self.state.pc.get() as u32);
-            self.state.pc = Address::new(1).expect("constant");
+            let saved_psr = self.state.psr;
+            self.push(memory, saved_psr);
+            self.push(memory, self.state.pc.get() as u32);
+            self.set_flag(PSR_IEN, false);
+            self.state.pc = Address::ZERO;
             return Ok(StepOutcome::Interrupted);
         }
-        // 通常のfetch/decode/execute。PCはexecute前に次命令を指すため、
-        // BSAが保存する値はそのまま正しいreturn addressになる。
         let pc_before = self.state.pc;
         self.state.ir = memory.read(pc_before);
         self.state.pc = self.state.pc.wrapping_add(1);
         self.state.executed_instructions = self.state.executed_instructions.wrapping_add(1);
-        let instruction = decode(self.state.ir)?;
+        let instruction = match decode(self.state.ir) {
+            Ok(i) => i,
+            Err(e) => {
+                self.state.halted = true;
+                return Err(CpuError::Decode(e));
+            }
+        };
         self.execute(instruction, memory, io);
         Ok(StepOutcome::Executed {
             pc_before,
             instruction,
         })
     }
-
     pub fn run(
         &mut self,
         memory: &mut impl Memory,
@@ -488,225 +447,59 @@ impl Cpu {
     ) -> Result<u64, CpuError> {
         let start = self.state.executed_instructions;
         while !self.state.halted {
-            if self.state.executed_instructions - start >= max_steps {
+            if self.state.executed_instructions.wrapping_sub(start) >= max_steps {
                 return Err(CpuError::StepLimitExceeded);
             }
             self.step(memory, io)?;
         }
-        Ok(self.state.executed_instructions - start)
+        Ok(self.state.executed_instructions.wrapping_sub(start))
     }
-
-    fn ea(&self, memory: &impl Memory, operand: Address, indirect: bool) -> Address {
-        if indirect {
-            Address::from_low12(memory.read(operand))
+    fn set_flag(&mut self, mask: Word, value: bool) {
+        if value {
+            self.state.psr |= mask
         } else {
-            operand
+            self.state.psr &= !mask
         }
+        self.state.psr &= PSR_MASK
     }
-    fn add(&mut self, lhs: u32, rhs: u32) {
-        let (result, carry) = lhs.overflowing_add(rhs);
-        self.state.ac = result;
-        self.state.e = if self.mode == CompatibilityMode::Legacy {
-            // Scala版は符号付きLongの上位32 bitでEを判定していた。
-            ((lhs as i32 as i64) + (rhs as i32 as i64)) >> 32 != 0
-        } else {
-            carry
-        }
+    fn update_nz(&mut self, v: Word) {
+        self.set_flag(PSR_N, v & 0x8000_0000 != 0);
+        self.set_flag(PSR_Z, v == 0)
     }
-    fn sub(&mut self, lhs: u32, rhs: u32) {
-        let (result, borrow) = lhs.overflowing_sub(rhs);
-        self.state.ac = result;
-        self.state.e = if self.mode == CompatibilityMode::Legacy {
-            // strictではE=borrow。legacyではScala版の上位bit判定を再現する。
-            ((lhs as i32 as i64) - (rhs as i32 as i64)) >> 32 != 0
-        } else {
-            borrow
-        }
+    fn add(&mut self, b: Word) {
+        let a = self.state.ac;
+        let (r, c) = a.overflowing_add(b);
+        let v = ((!(a ^ b) & (a ^ r)) & 0x8000_0000) != 0;
+        self.state.ac = r;
+        self.update_nz(r);
+        self.set_flag(PSR_C, c);
+        self.set_flag(PSR_V, v)
+    }
+    fn subtraction_flags(&mut self, a: Word, b: Word) -> Word {
+        let r = a.wrapping_sub(b);
+        self.update_nz(r);
+        self.set_flag(PSR_C, a >= b);
+        self.set_flag(PSR_V, (((a ^ b) & (a ^ r)) & 0x8000_0000) != 0);
+        r
+    }
+    fn sub(&mut self, b: Word) {
+        self.state.ac = self.subtraction_flags(self.state.ac, b)
+    }
+    fn logic(&mut self, v: Word) {
+        self.state.ac = v;
+        self.update_nz(v)
+    }
+    fn push(&mut self, m: &mut impl Memory, v: Word) {
+        self.state.sp = self.state.sp.wrapping_add_signed(-1);
+        m.write(self.state.sp, v)
+    }
+    fn pop(&mut self, m: &impl Memory) -> Word {
+        let v = m.read(self.state.sp);
+        self.state.sp = self.state.sp.wrapping_add(1);
+        v
     }
     fn skip(&mut self) {
         self.state.pc = self.state.pc.wrapping_add(1)
-    }
-    fn execute(&mut self, i: Instruction, m: &mut impl Memory, io: &mut impl IoBus) {
-        match i {
-            Instruction::N1 {
-                op,
-                operand,
-                indirect,
-            } => {
-                let ea = self.ea(m, operand, indirect);
-                let value = m.read(ea);
-                match op {
-                    N1Op::Add => self.add(self.state.ac, value),
-                    N1Op::Sub => self.sub(self.state.ac, value),
-                    N1Op::And => self.state.ac &= value,
-                    N1Op::Or => self.state.ac |= value,
-                    N1Op::Xor => self.state.ac ^= value,
-                    N1Op::Lda => self.state.ac = value,
-                    N1Op::Sta => m.write(ea, self.state.ac),
-                    N1Op::Bun => self.state.pc = ea,
-                    N1Op::Bsa => {
-                        m.write(ea, self.state.pc.get() as u32);
-                        self.state.pc = ea.wrapping_add(1)
-                    }
-                    N1Op::Jpa => {
-                        if self.state.ac as i32 >= 0 {
-                            self.state.pc = ea
-                        }
-                    }
-                    N1Op::Jza => {
-                        // 旧Scala版はJZAとJNAのdispatchだけが入れ替わっていた。
-                        let yes = if self.mode == CompatibilityMode::Legacy {
-                            (self.state.ac as i32) < 0
-                        } else {
-                            self.state.ac == 0
-                        };
-                        if yes {
-                            self.state.pc = ea
-                        }
-                    }
-                    N1Op::Jna => {
-                        let yes = if self.mode == CompatibilityMode::Legacy {
-                            self.state.ac == 0
-                        } else {
-                            (self.state.ac as i32) < 0
-                        };
-                        if yes {
-                            self.state.pc = ea
-                        }
-                    }
-                    N1Op::Jze => {
-                        if !self.state.e {
-                            self.state.pc = ea
-                        }
-                    }
-                    N1Op::Isz => {
-                        let result = value.wrapping_add(1);
-                        m.write(ea, result);
-                        if result == 0 {
-                            self.skip()
-                        }
-                    }
-                }
-            }
-            Instruction::N2 {
-                op,
-                operand1,
-                operand2,
-                indirect,
-            } => {
-                let lhs = m.read(operand1);
-                let rhs = m.read(self.ea(m, operand2, indirect));
-                match op {
-                    N2Op::Add => self.add(lhs, rhs),
-                    // EX3のN2 SUBはoperand2 - operand1の順序である。
-                    N2Op::Sub if self.mode == CompatibilityMode::Legacy => {
-                        // Historical N2 SUB did not update E.
-                        self.state.ac = rhs.wrapping_sub(lhs)
-                    }
-                    N2Op::Sub => self.sub(rhs, lhs),
-                    N2Op::And => self.state.ac = lhs & rhs,
-                    N2Op::Or => self.state.ac = lhs | rhs,
-                    N2Op::Xor => self.state.ac = lhs ^ rhs,
-                    N2Op::Move => m.write(operand1, rhs),
-                }
-            }
-            Instruction::Immediate { op, value } => {
-                let v = value.as_word();
-                match op {
-                    ImmediateOp::Add => self.add(self.state.ac, v),
-                    ImmediateOp::And => self.state.ac &= v,
-                    ImmediateOp::Or => self.state.ac |= v,
-                    ImmediateOp::Lda => self.state.ac = v,
-                }
-            }
-            Instruction::MemoryImmediate {
-                op,
-                operand,
-                value,
-                indirect,
-            } => {
-                let ea = self.ea(m, operand, indirect);
-                let memory_value = m.read(ea);
-                let immediate = value.as_word();
-                match op {
-                    MemoryImmediateOp::Add => self.add(memory_value, immediate),
-                    MemoryImmediateOp::And => self.state.ac = memory_value & immediate,
-                    MemoryImmediateOp::Or => self.state.ac = memory_value | immediate,
-                    MemoryImmediateOp::Sta => m.write(ea, immediate),
-                }
-            }
-            Instruction::NoOperand(op) => match op {
-                NoOperandOp::Cla => self.state.ac = 0,
-                NoOperandOp::Cle => self.state.e = false,
-                NoOperandOp::Cma => self.state.ac = !self.state.ac,
-                NoOperandOp::Cme => self.state.e = !self.state.e,
-                NoOperandOp::Cir => {
-                    let old_e = self.state.e;
-                    self.state.e = self.state.ac & 1 != 0;
-                    // legacyのみScalaの算術右シフトを維持する。
-                    self.state.ac = if self.mode == CompatibilityMode::Legacy {
-                        ((self.state.ac as i32) >> 1) as u32
-                    } else {
-                        self.state.ac >> 1
-                    } | if old_e { 0x80000000 } else { 0 }
-                }
-                NoOperandOp::Cil => {
-                    let old_e = self.state.e;
-                    self.state.e = self.state.ac & 0x80000000 != 0;
-                    self.state.ac = (self.state.ac << 1) | u32::from(old_e)
-                }
-                NoOperandOp::Inc => self.state.ac = self.state.ac.wrapping_add(1),
-                NoOperandOp::Spa => {
-                    if self.state.ac as i32 >= 0 {
-                        self.skip()
-                    }
-                }
-                NoOperandOp::Sza => {
-                    if self.state.ac == 0 {
-                        self.skip()
-                    }
-                }
-                NoOperandOp::Sna => {
-                    if (self.state.ac as i32) < 0 {
-                        self.skip()
-                    }
-                }
-                NoOperandOp::Sze => {
-                    if !self.state.e {
-                        self.skip()
-                    }
-                }
-                NoOperandOp::Inp => {
-                    let kind = self.selected();
-                    if let Some(v) = io.read_input(kind) {
-                        self.io.input_register = v;
-                        self.state.ac = if self.mode == CompatibilityMode::Legacy {
-                            // Scala ByteからIntへの符号拡張を互換再現する。
-                            (self.state.ac & 0xffff_ff00) | ((v as i8 as i32) as u32)
-                        } else {
-                            (self.state.ac & 0xffffff00) | v as u32
-                        }
-                    }
-                }
-                NoOperandOp::Out => io.write_output(self.selected(), self.state.ac as u8),
-                NoOperandOp::Ski => {
-                    if io.input_ready(self.selected()) {
-                        self.skip()
-                    }
-                }
-                NoOperandOp::Sko => {
-                    if io.output_ready(self.selected()) {
-                        self.skip()
-                    }
-                }
-                NoOperandOp::Ion => self.io.interrupt_enabled = true,
-                NoOperandOp::Iof => self.io.interrupt_enabled = false,
-                NoOperandOp::Sio => self.io.serial_selected = true,
-                NoOperandOp::Pio => self.io.serial_selected = false,
-                NoOperandOp::Imk => self.io.interrupt_mask = self.state.ac as u8 & 0xf,
-                NoOperandOp::Hlt => self.state.halted = true,
-            },
-        }
     }
     fn selected(&self) -> IoKind {
         if self.io.serial_selected {
@@ -715,11 +508,138 @@ impl Cpu {
             IoKind::Parallel
         }
     }
+    fn execute(&mut self, i: Instruction, m: &mut impl Memory, io: &mut impl IoBus) {
+        match i {
+            Instruction::Memory {
+                op,
+                address,
+                indirect,
+            } => {
+                let ea = if indirect {
+                    Address::from_low16(m.read(address))
+                } else {
+                    address
+                };
+                let b = m.read(ea);
+                match op {
+                    MemoryOp::Add => self.add(b),
+                    MemoryOp::Sub => self.sub(b),
+                    MemoryOp::And => self.logic(self.state.ac & b),
+                    MemoryOp::Or => self.logic(self.state.ac | b),
+                    MemoryOp::Xor => self.logic(self.state.ac ^ b),
+                    MemoryOp::Lda => self.logic(b),
+                    MemoryOp::Sta => m.write(ea, self.state.ac),
+                    MemoryOp::Cmp => {
+                        self.subtraction_flags(self.state.ac, b);
+                    }
+                    MemoryOp::Isz => {
+                        let v = b.wrapping_add(1);
+                        m.write(ea, v);
+                        if v == 0 {
+                            self.skip()
+                        }
+                    }
+                }
+            }
+            Instruction::Immediate { op, value } => match op {
+                ImmediateOp::Add => self.add(value.sign_extended()),
+                ImmediateOp::Sub => self.sub(value.sign_extended()),
+                ImmediateOp::And => self.logic(self.state.ac & value.zero_extended()),
+                ImmediateOp::Or => self.logic(self.state.ac | value.zero_extended()),
+                ImmediateOp::Xor => self.logic(self.state.ac ^ value.zero_extended()),
+                ImmediateOp::Lda => self.logic(value.sign_extended()),
+                ImmediateOp::Cmp => {
+                    self.subtraction_flags(self.state.ac, value.sign_extended());
+                }
+                ImmediateOp::Ldhi => {
+                    self.logic((self.state.ac & 0x0000_ffff) | ((value.raw() as u32) << 16))
+                }
+                ImmediateOp::Ldlo => self.logic((self.state.ac & 0xffff_0000) | value.raw() as u32),
+                ImmediateOp::Adjsp => {
+                    self.state.sp = self.state.sp.wrapping_add_signed(value.as_i16())
+                }
+            },
+            Instruction::SpRelative { op, offset } => {
+                let ea = self.state.sp.wrapping_add_signed(offset.as_i16());
+                let b = m.read(ea);
+                match op {
+                    SpRelativeOp::Addsp => self.add(b),
+                    SpRelativeOp::Subsp => self.sub(b),
+                    SpRelativeOp::Andsp => self.logic(self.state.ac & b),
+                    SpRelativeOp::Orsp => self.logic(self.state.ac | b),
+                    SpRelativeOp::Xorsp => self.logic(self.state.ac ^ b),
+                    SpRelativeOp::Ldsp => self.logic(b),
+                    SpRelativeOp::Stsp => m.write(ea, self.state.ac),
+                    SpRelativeOp::Cmpsp => {
+                        self.subtraction_flags(self.state.ac, b);
+                    }
+                }
+            }
+            Instruction::Branch { op, target } => {
+                let take = match op {
+                    BranchOp::Jmp | BranchOp::Call => true,
+                    BranchOp::Beq => self.state.zero(),
+                    BranchOp::Bne => !self.state.zero(),
+                    BranchOp::Blt => self.state.negative() != self.state.overflow(),
+                    BranchOp::Bge => self.state.negative() == self.state.overflow(),
+                    BranchOp::Bgt => {
+                        !self.state.zero() && self.state.negative() == self.state.overflow()
+                    }
+                    BranchOp::Ble => {
+                        self.state.zero() || self.state.negative() != self.state.overflow()
+                    }
+                    BranchOp::Bult => !self.state.carry(),
+                    BranchOp::Buge => self.state.carry(),
+                    BranchOp::Bugt => self.state.carry() && !self.state.zero(),
+                    BranchOp::Bule => !self.state.carry() || self.state.zero(),
+                };
+                if take {
+                    if op == BranchOp::Call {
+                        self.push(m, self.state.pc.get() as u32)
+                    }
+                    self.state.pc = target
+                }
+            }
+            Instruction::System(op) => match op {
+                SystemOp::Cla => self.logic(0),
+                SystemOp::Cma => self.logic(!self.state.ac),
+                SystemOp::Ret => self.state.pc = Address::from_low16(self.pop(m)),
+                SystemOp::Iret => {
+                    self.state.pc = Address::from_low16(self.pop(m));
+                    self.state.psr = self.pop(m) & PSR_MASK
+                }
+                SystemOp::Hlt => self.state.halted = true,
+                SystemOp::Inp => {
+                    if let Some(v) = io.read_input(self.selected()) {
+                        self.io.input_register = v;
+                        self.state.ac = (self.state.ac & 0xffff_ff00) | v as u32
+                    }
+                }
+                SystemOp::Out => io.write_output(self.selected(), self.state.ac as u8),
+                SystemOp::Ski => {
+                    if io.input_ready(self.selected()) {
+                        self.skip()
+                    }
+                }
+                SystemOp::Sko => {
+                    if io.output_ready(self.selected()) {
+                        self.skip()
+                    }
+                }
+                SystemOp::Ion => self.set_flag(PSR_IEN, true),
+                SystemOp::Iof => self.set_flag(PSR_IEN, false),
+                SystemOp::Sio => self.io.serial_selected = true,
+                SystemOp::Pio => self.io.serial_selected = false,
+                SystemOp::Imk => self.io.interrupt_mask = self.state.ac as u8 & 0xf,
+            },
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::isa::Immediate16;
     fn at(m: &mut ArrayMemory, a: u16, i: Instruction) {
         m.write(Address::new(a).unwrap(), i.encode())
     }
@@ -727,347 +647,188 @@ mod tests {
     fn reset_and_halt() {
         let mut c = Cpu::default();
         let mut m = ArrayMemory::default();
-        let mut io = NullIoBus;
-        at(&mut m, 0x10, Instruction::NoOperand(NoOperandOp::Hlt));
-        c.step(&mut m, &mut io).unwrap();
+        at(&mut m, 0x10, Instruction::System(SystemOp::Hlt));
+        c.step(&mut m, &mut NullIoBus).unwrap();
         assert!(c.state.halted);
-        assert_eq!(c.state.executed_instructions, 1)
+        assert_eq!(c.state.sp, Address::ZERO)
     }
     #[test]
-    fn pc_wraps_from_fff_to_000() {
-        let mut cpu = Cpu::default();
-        let mut memory = ArrayMemory::default();
-        let mut io = NullIoBus;
-        cpu.state.pc = Address::new(0xfff).unwrap();
-        at(&mut memory, 0xfff, Instruction::NoOperand(NoOperandOp::Hlt));
-
-        cpu.step(&mut memory, &mut io).unwrap();
-
-        assert_eq!(cpu.state.pc, Address::ZERO);
-    }
-    #[test]
-    fn arithmetic_and_carry() {
+    fn flags_and_signed_unsigned_branches() {
         let mut c = Cpu::default();
         let mut m = ArrayMemory::default();
-        let mut io = NullIoBus;
-        c.state.ac = u32::MAX;
+        c.state.ac = 0x7fff_ffff;
         at(
             &mut m,
             0x10,
             Instruction::Immediate {
                 op: ImmediateOp::Add,
-                value: crate::isa::Immediate12::from_signed(1).unwrap(),
+                value: Immediate16::from_raw(1),
             },
         );
-        c.step(&mut m, &mut io).unwrap();
-        assert_eq!(c.state.ac, 0);
-        assert!(c.state.e)
+        c.step(&mut m, &mut NullIoBus).unwrap();
+        assert!(c.state.negative());
+        assert!(c.state.overflow());
+        assert!(!c.state.carry());
     }
     #[test]
-    fn strict_sub_sets_borrow() {
-        let mut cpu = Cpu::default();
-        let mut memory = ArrayMemory::default();
-        let mut io = NullIoBus;
-        let value = Address::new(0x20).unwrap();
-        memory.write(value, 1);
-        at(
-            &mut memory,
-            0x10,
-            Instruction::N1 {
-                op: N1Op::Sub,
-                operand: value,
-                indirect: false,
-            },
-        );
-
-        cpu.step(&mut memory, &mut io).unwrap();
-
-        assert_eq!(cpu.state.ac, u32::MAX);
-        assert!(cpu.state.e);
-    }
-    #[test]
-    fn legacy_add_e_matches_scala_rule() {
-        let mut cpu = Cpu::new(CompatibilityMode::Legacy);
-        let mut memory = ArrayMemory::default();
-        let mut io = NullIoBus;
-        cpu.state.ac = u32::MAX;
-        at(
-            &mut memory,
-            0x10,
-            Instruction::Immediate {
-                op: ImmediateOp::Add,
-                value: crate::isa::Immediate12::from_signed(1).unwrap(),
-            },
-        );
-
-        cpu.step(&mut memory, &mut io).unwrap();
-
-        assert_eq!(cpu.state.ac, 0);
-        assert!(!cpu.state.e);
-    }
-    #[test]
-    fn indirect_load_store() {
-        let mut c = Cpu::default();
-        let mut m = ArrayMemory::default();
-        let mut io = NullIoBus;
-        let p = Address::new(0x20).unwrap();
-        m.write(p, 0x1021);
-        m.write(Address::new(0x21).unwrap(), 42);
-        at(
-            &mut m,
-            0x10,
-            Instruction::N1 {
-                op: N1Op::Lda,
-                operand: p,
-                indirect: true,
-            },
-        );
-        c.step(&mut m, &mut io).unwrap();
-        assert_eq!(c.state.ac, 42)
-    }
-    #[test]
-    fn bsa_return() {
-        let mut c = Cpu::default();
-        let mut m = ArrayMemory::default();
-        let mut io = NullIoBus;
-        let sub = Address::new(0x20).unwrap();
-        at(
-            &mut m,
-            0x10,
-            Instruction::N1 {
-                op: N1Op::Bsa,
-                operand: sub,
-                indirect: false,
-            },
-        );
-        at(
-            &mut m,
-            0x21,
-            Instruction::N1 {
-                op: N1Op::Bun,
-                operand: sub,
-                indirect: true,
-            },
-        );
-        c.step(&mut m, &mut io).unwrap();
-        assert_eq!(m.read(sub), 0x11);
-        c.step(&mut m, &mut io).unwrap();
-        assert_eq!(c.state.pc.get(), 0x11)
-    }
-    #[test]
-    fn rotate_modes() {
-        let mut m = ArrayMemory::default();
-        let mut io = NullIoBus;
-        at(&mut m, 0x10, Instruction::NoOperand(NoOperandOp::Cir));
-        let mut strict = Cpu::default();
-        strict.state.ac = 0x80000000;
-        strict.step(&mut m, &mut io).unwrap();
-        assert_eq!(strict.state.ac, 0x40000000);
-        let mut legacy = Cpu::new(CompatibilityMode::Legacy);
-        legacy.state.ac = 0x80000000;
-        legacy.step(&mut m, &mut io).unwrap();
-        assert_eq!(legacy.state.ac, 0xc0000000)
-    }
-    #[test]
-    fn io_and_interrupt() {
-        let mut c = Cpu::default();
-        let mut m = ArrayMemory::default();
-        let mut io = DeterministicIoBus::default();
-        io.push_input(IoKind::Parallel, 0xab);
-        c.state.ac = 0x12340000;
-        at(&mut m, 0x10, Instruction::NoOperand(NoOperandOp::Inp));
-        c.step(&mut m, &mut io).unwrap();
-        assert_eq!(c.state.ac, 0x123400ab);
-        c.io.interrupt_enabled = true;
-        c.io.interrupt_mask = 2;
-        io.push_input(IoKind::Parallel, 1);
-        assert_eq!(c.step(&mut m, &mut io).unwrap(), StepOutcome::Interrupted);
-        assert_eq!(m.read(Address::ZERO), 0x11);
-        assert_eq!(c.state.pc.get(), 1)
-    }
-
-    #[test]
-    fn legacy_inp_preserves_upper_bits_for_ascii_input() {
-        let mut cpu = Cpu::new(CompatibilityMode::Legacy);
-        let mut memory = ArrayMemory::default();
-        let mut io = DeterministicIoBus::default();
-        cpu.state.ac = 0x1234_0000;
-        io.push_input(IoKind::Parallel, 0x41);
-        at(&mut memory, 0x10, Instruction::NoOperand(NoOperandOp::Inp));
-
-        cpu.step(&mut memory, &mut io).unwrap();
-
-        assert_eq!(cpu.state.ac, 0x1234_0041);
-    }
-
-    #[test]
-    fn strict_inp_zero_extends_high_bit_input() {
-        let mut cpu = Cpu::default();
-        let mut memory = ArrayMemory::default();
-        let mut io = DeterministicIoBus::default();
-        cpu.state.ac = 0x1234_0000;
-        io.push_input(IoKind::Parallel, 0x80);
-        at(&mut memory, 0x10, Instruction::NoOperand(NoOperandOp::Inp));
-
-        cpu.step(&mut memory, &mut io).unwrap();
-
-        assert_eq!(cpu.state.ac, 0x1234_0080);
-    }
-
-    #[test]
-    fn legacy_inp_reproduces_signed_byte_promotion() {
-        let mut cpu = Cpu::new(CompatibilityMode::Legacy);
-        let mut memory = ArrayMemory::default();
-        let mut io = DeterministicIoBus::default();
-        cpu.state.ac = 0x1234_0000;
-        io.push_input(IoKind::Parallel, 0x80);
-        at(&mut memory, 0x10, Instruction::NoOperand(NoOperandOp::Inp));
-
-        cpu.step(&mut memory, &mut io).unwrap();
-
-        assert_eq!(cpu.state.ac, 0xffff_ff80);
-    }
-
-    #[test]
-    fn legacy_n2_sub_preserves_e() {
-        let a = Address::new(0x20).unwrap();
-        let b = Address::new(0x21).unwrap();
-        let instruction = Instruction::N2 {
-            op: N2Op::Sub,
-            operand1: a,
-            operand2: b,
-            indirect: false,
-        };
-
-        for (lhs, rhs, initial_e, expected) in [(3, 10, true, 7), (10, 3, false, 0xffff_fff9)] {
-            let mut cpu = Cpu::new(CompatibilityMode::Legacy);
+    fn every_branch_condition_uses_nzcv() {
+        let cases = [
+            (BranchOp::Jmp, 0, true),
+            (BranchOp::Beq, PSR_Z, true),
+            (BranchOp::Beq, 0, false),
+            (BranchOp::Bne, 0, true),
+            (BranchOp::Blt, PSR_N, true),
+            (BranchOp::Blt, PSR_N | PSR_V, false),
+            (BranchOp::Bge, PSR_N | PSR_V, true),
+            (BranchOp::Bgt, 0, true),
+            (BranchOp::Bgt, PSR_Z, false),
+            (BranchOp::Ble, PSR_Z, true),
+            (BranchOp::Bult, 0, true),
+            (BranchOp::Buge, PSR_C, true),
+            (BranchOp::Bugt, PSR_C, true),
+            (BranchOp::Bugt, PSR_C | PSR_Z, false),
+            (BranchOp::Bule, 0, true),
+            (BranchOp::Bule, PSR_C | PSR_Z, true),
+        ];
+        for (op, psr, expected) in cases {
+            let mut cpu = Cpu::default();
             let mut memory = ArrayMemory::default();
-            let mut io = NullIoBus;
-            cpu.state.e = initial_e;
-            memory.write(a, lhs);
-            memory.write(b, rhs);
-            at(&mut memory, 0x10, instruction);
-
-            cpu.step(&mut memory, &mut io).unwrap();
-
-            assert_eq!(cpu.state.ac, expected);
-            assert_eq!(cpu.state.e, initial_e);
-        }
-    }
-
-    #[test]
-    fn legacy_output_is_not_ready_at_reset() {
-        let io = LegacyIoBus::new(1);
-        assert!(!io.output_ready(IoKind::Serial));
-        assert!(!io.output_ready(IoKind::Parallel));
-    }
-
-    #[test]
-    fn legacy_unmasked_port_does_not_tick() {
-        let mut io = LegacyIoBus::new(1);
-        let serial_only = IoTickContext {
-            interrupt_enabled: true,
-            interrupt_mask: 0x4,
-        };
-        for _ in 0..10 {
-            io.tick(serial_only);
-        }
-        assert!(io.output_ready(IoKind::Serial));
-        assert!(!io.output_ready(IoKind::Parallel));
-    }
-
-    #[test]
-    fn legacy_disabled_interrupt_freezes_peripheral_time() {
-        let mut io = LegacyIoBus::new(1);
-        let disabled = IoTickContext {
-            interrupt_enabled: false,
-            interrupt_mask: 0x1,
-        };
-        for _ in 0..10 {
-            io.tick(disabled);
-        }
-        assert!(!io.output_ready(IoKind::Parallel));
-    }
-
-    #[test]
-    fn legacy_parallel_output_becomes_ready_after_expected_ticks() {
-        let mut io = LegacyIoBus::new(1);
-        let parallel_output = IoTickContext {
-            interrupt_enabled: true,
-            interrupt_mask: 0x1,
-        };
-        io.tick(parallel_output); // interval -1 -> 1
-        assert!(!io.output_ready(IoKind::Parallel));
-        io.tick(parallel_output); // interval 1 -> 0
-        assert!(!io.output_ready(IoKind::Parallel));
-        io.tick(parallel_output); // interval 0 -> ready
-        assert!(io.output_ready(IoKind::Parallel));
-    }
-
-    #[test]
-    fn legacy_input_delay_is_seed_deterministic() {
-        let mut first = LegacyIoBus::new(1234);
-        let mut second = LegacyIoBus::new(1234);
-        first.push_input(IoKind::Serial, 0x41);
-        second.push_input(IoKind::Serial, 0x41);
-        let serial_input = IoTickContext {
-            interrupt_enabled: true,
-            interrupt_mask: 0x8,
-        };
-        for _ in 0..100 {
-            assert_eq!(
-                first.input_ready(IoKind::Serial),
-                second.input_ready(IoKind::Serial)
-            );
-            first.tick(serial_input);
-            second.tick(serial_input);
-        }
-        assert_eq!(
-            first.read_input(IoKind::Serial),
-            second.read_input(IoKind::Serial)
-        );
-    }
-    #[test]
-    fn branch_legacy_swap() {
-        let mut m = ArrayMemory::default();
-        let mut io = NullIoBus;
-        at(
-            &mut m,
-            0x10,
-            Instruction::N1 {
-                op: N1Op::Jza,
-                operand: Address::new(0x20).unwrap(),
-                indirect: false,
-            },
-        );
-        let mut strict = Cpu::default();
-        strict.step(&mut m, &mut io).unwrap();
-        assert_eq!(strict.state.pc.get(), 0x20);
-        let mut legacy = Cpu::new(CompatibilityMode::Legacy);
-        legacy.step(&mut m, &mut io).unwrap();
-        assert_eq!(legacy.state.pc.get(), 0x11)
-    }
-    #[test]
-    fn legacy_jza_is_jna_and_jna_is_jza() {
-        let target = Address::new(0x20).unwrap();
-        for (op, ac) in [(N1Op::Jza, 0x8000_0000), (N1Op::Jna, 0)] {
-            let mut cpu = Cpu::new(CompatibilityMode::Legacy);
-            let mut memory = ArrayMemory::default();
-            let mut io = NullIoBus;
-            cpu.state.ac = ac;
+            cpu.state.psr = psr;
             at(
                 &mut memory,
                 0x10,
-                Instruction::N1 {
+                Instruction::Branch {
                     op,
-                    operand: target,
-                    indirect: false,
+                    target: Address::new(0x2222).unwrap(),
                 },
             );
-
-            cpu.step(&mut memory, &mut io).unwrap();
-
-            assert_eq!(cpu.state.pc, target);
+            cpu.step(&mut memory, &mut NullIoBus).unwrap();
+            assert_eq!(cpu.state.pc.get() == 0x2222, expected, "{op:?} {psr:#x}");
         }
+    }
+    #[test]
+    fn subtraction_cmp_and_logical_flag_rules() {
+        let mut cpu = Cpu::default();
+        cpu.state.ac = 0x8000_0000;
+        cpu.sub(1);
+        assert_eq!(cpu.state.ac, 0x7fff_ffff);
+        assert!(cpu.state.carry());
+        assert!(cpu.state.overflow());
+
+        cpu.state.ac = 0;
+        cpu.sub(1);
+        assert_eq!(cpu.state.ac, u32::MAX);
+        assert!(!cpu.state.carry());
+        assert!(!cpu.state.overflow());
+
+        cpu.state.ac = 7;
+        let result = cpu.subtraction_flags(cpu.state.ac, 7);
+        assert_eq!(result, 0);
+        assert_eq!(cpu.state.ac, 7);
+        assert!(cpu.state.zero());
+        assert!(cpu.state.carry());
+
+        cpu.state.psr = PSR_C | PSR_V;
+        cpu.logic(0);
+        assert_eq!(cpu.state.psr, PSR_C | PSR_V | PSR_Z);
+    }
+    #[test]
+    fn partial_load_isz_and_sp_relative_follow_flag_rules() {
+        let mut cpu = Cpu::default();
+        let mut memory = ArrayMemory::default();
+        let mut io = NullIoBus;
+        cpu.state.ac = 0x1234_5678;
+        cpu.state.psr = PSR_C | PSR_V;
+        at(
+            &mut memory,
+            0x10,
+            Instruction::Immediate {
+                op: ImmediateOp::Ldhi,
+                value: Immediate16::from_raw(0x8000),
+            },
+        );
+        cpu.step(&mut memory, &mut io).unwrap();
+        assert_eq!(cpu.state.ac, 0x8000_5678);
+        assert_eq!(cpu.state.psr, PSR_N | PSR_C | PSR_V);
+
+        let cell = Address::new(0x3333).unwrap();
+        memory.write(cell, u32::MAX);
+        at(
+            &mut memory,
+            0x11,
+            Instruction::Memory {
+                op: MemoryOp::Isz,
+                address: cell,
+                indirect: false,
+            },
+        );
+        cpu.step(&mut memory, &mut io).unwrap();
+        assert_eq!(memory.read(cell), 0);
+        assert_eq!(cpu.state.pc.get(), 0x13);
+        assert_eq!(cpu.state.psr, PSR_N | PSR_C | PSR_V);
+
+        cpu.state.pc = Address::new(0x20).unwrap();
+        cpu.state.sp = Address::ZERO;
+        memory.write(Address::new(0xffff).unwrap(), 42);
+        at(
+            &mut memory,
+            0x20,
+            Instruction::SpRelative {
+                op: SpRelativeOp::Ldsp,
+                offset: Immediate16::from_raw(0xffff),
+            },
+        );
+        cpu.step(&mut memory, &mut io).unwrap();
+        assert_eq!(cpu.state.ac, 42);
+    }
+    #[test]
+    fn call_ret_uses_stack() {
+        let mut c = Cpu::default();
+        let mut m = ArrayMemory::default();
+        c.state.sp = Address::new(0x8000).unwrap();
+        at(
+            &mut m,
+            0x10,
+            Instruction::Branch {
+                op: BranchOp::Call,
+                target: Address::new(0x20).unwrap(),
+            },
+        );
+        at(&mut m, 0x20, Instruction::System(SystemOp::Ret));
+        c.step(&mut m, &mut NullIoBus).unwrap();
+        assert_eq!(c.state.sp.get(), 0x7fff);
+        assert_eq!(m.read(c.state.sp), 0x11);
+        c.step(&mut m, &mut NullIoBus).unwrap();
+        assert_eq!(c.state.pc.get(), 0x11);
+        assert_eq!(c.state.sp.get(), 0x8000)
+    }
+    #[test]
+    fn interrupt_frame_and_iret() {
+        let mut c = Cpu::default();
+        let mut m = ArrayMemory::default();
+        let mut io = DeterministicIoBus::default();
+        c.state.sp = Address::new(0x9000).unwrap();
+        c.state.psr = PSR_IEN | PSR_C;
+        c.io.interrupt_mask = 2;
+        io.push_input(IoKind::Parallel, 1);
+        assert_eq!(c.step(&mut m, &mut io).unwrap(), StepOutcome::Interrupted);
+        assert_eq!(c.state.pc, Address::ZERO);
+        assert_eq!(c.state.sp.get(), 0x8ffe);
+        assert_eq!(m.read(c.state.sp), 0x10);
+        assert_eq!(m.read(c.state.sp.wrapping_add(1)), PSR_IEN | PSR_C);
+        at(&mut m, 0, Instruction::System(SystemOp::Iret));
+        io.read_input(IoKind::Parallel);
+        c.step(&mut m, &mut io).unwrap();
+        assert_eq!(c.state.pc.get(), 0x10);
+        assert_eq!(c.state.sp.get(), 0x9000);
+        assert_eq!(c.state.psr, PSR_IEN | PSR_C)
+    }
+    #[test]
+    fn illegal_instruction_halts() {
+        let mut c = Cpu::default();
+        let mut m = ArrayMemory::default();
+        m.write(Address::RESET, 0xe000_0000);
+        assert!(c.step(&mut m, &mut NullIoBus).is_err());
+        assert!(c.state.halted)
     }
 }

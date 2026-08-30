@@ -6,7 +6,6 @@ use ex3::{
     },
     isa::{decode, Address},
     output::{format_mem, format_probe, parse_mem},
-    CompatibilityMode,
 };
 use std::{
     env,
@@ -52,7 +51,7 @@ fn real_main() -> Result<(), Box<dyn Error>> {
     }
 }
 fn print_help() {
-    println!("EX3 32-bit assembler and emulator\n\nUsage:\n  ex3 assemble <file.asm> [-o file.mem] [--probe file.prb] [--compat strict|legacy]\n  ex3 check <file.asm> [--compat strict|legacy]\n  ex3 run <file.asm|file.mem> [--compat strict|legacy] [--io null|legacy] [--seed N] [--max-steps N] [--trace] [--break ADDR]\n  ex3 debug <file.asm|file.mem> [--compat strict|legacy] [--io null|legacy] [--seed N]\n  ex3 disasm --word <WORD>\n  ex3 disasm --file <file.mem>")
+    println!("EX3 v3.0 assembler and emulator\n\nUsage:\n  ex3 assemble <file.asm> [-o file.mem] [--probe file.prb]\n  ex3 check <file.asm>\n  ex3 run <file.asm|file.mem> [--io null|legacy] [--seed N] [--max-steps N] [--trace] [--break ADDR]\n  ex3 debug <file.asm|file.mem> [--io null|legacy] [--seed N]\n  ex3 disasm --word <WORD>\n  ex3 disasm --file <file.mem>")
 }
 
 // 外部crateに依存せず、小規模な`--option value`形式だけを扱う。
@@ -67,7 +66,6 @@ fn input_arg(args: &[String]) -> Result<&str, Box<dyn Error>> {
         "-o",
         "--output",
         "--probe",
-        "--compat",
         "--max-steps",
         "--break",
         "--seed",
@@ -87,14 +85,6 @@ fn input_arg(args: &[String]) -> Result<&str, Box<dyn Error>> {
     }
     Err("missing input file".into())
 }
-fn mode(args: &[String]) -> Result<CompatibilityMode, Box<dyn Error>> {
-    match option(args, "--compat").as_deref() {
-        None | Some("strict") => Ok(CompatibilityMode::Strict),
-        Some("legacy") => Ok(CompatibilityMode::Legacy),
-        Some(v) => Err(format!("invalid compatibility mode `{v}`").into()),
-    }
-}
-
 enum RuntimeIoBus {
     Null(NullIoBus),
     Legacy(LegacyIoBus),
@@ -157,16 +147,13 @@ fn io_bus(args: &[String]) -> Result<RuntimeIoBus, Box<dyn Error>> {
         }
     }
 }
-fn assemble_source(
-    path: &str,
-    mode: CompatibilityMode,
-) -> Result<ex3::assembler::AssemblyResult, Box<dyn Error>> {
+fn assemble_source(path: &str) -> Result<ex3::assembler::AssemblyResult, Box<dyn Error>> {
     let source = fs::read_to_string(path)?;
-    Ok(Assembler::new().compatibility(mode).assemble(&source)?)
+    Ok(Assembler::new().assemble(&source)?)
 }
 fn assemble_cmd(args: &[String]) -> Result<(), Box<dyn Error>> {
     let input = input_arg(args)?;
-    let result = assemble_source(input, mode(args)?)?;
+    let result = assemble_source(input)?;
     let base = Path::new(input);
     let output = option(args, "-o")
         .or_else(|| option(args, "--output"))
@@ -187,7 +174,7 @@ fn assemble_cmd(args: &[String]) -> Result<(), Box<dyn Error>> {
 }
 fn check_cmd(args: &[String]) -> Result<(), Box<dyn Error>> {
     let input = input_arg(args)?;
-    let result = assemble_source(input, mode(args)?)?;
+    let result = assemble_source(input)?;
     println!(
         "ok: {} words, {} symbols",
         result.image.cells.len(),
@@ -195,7 +182,7 @@ fn check_cmd(args: &[String]) -> Result<(), Box<dyn Error>> {
     );
     Ok(())
 }
-fn load(path: &str, mode: CompatibilityMode) -> Result<ArrayMemory, Box<dyn Error>> {
+fn load(path: &str) -> Result<ArrayMemory, Box<dyn Error>> {
     // 拡張子でアセンブリソースと既存メモリイメージを区別する。
     if Path::new(path)
         .extension()
@@ -205,7 +192,7 @@ fn load(path: &str, mode: CompatibilityMode) -> Result<ArrayMemory, Box<dyn Erro
             path,
         )?)?))
     } else {
-        Ok(ArrayMemory::from_image(&assemble_source(path, mode)?.image))
+        Ok(ArrayMemory::from_image(&assemble_source(path)?.image))
     }
 }
 fn parse_u64(s: &str) -> Result<u64, Box<dyn Error>> {
@@ -225,9 +212,8 @@ fn parse_address(s: &str) -> Result<Address, Box<dyn Error>> {
 }
 fn run_cmd(args: &[String]) -> Result<(), Box<dyn Error>> {
     let input = input_arg(args)?;
-    let mode = mode(args)?;
-    let mut memory = load(input, mode)?;
-    let mut cpu = Cpu::new(mode);
+    let mut memory = load(input)?;
+    let mut cpu = Cpu::new();
     let mut io = io_bus(args)?;
     let max = option(args, "--max-steps")
         .map(|x| parse_u64(&x))
@@ -287,22 +273,21 @@ fn disasm_cmd(args: &[String]) -> Result<(), Box<dyn Error>> {
 }
 fn debug_cmd(args: &[String]) -> Result<(), Box<dyn Error>> {
     let input = input_arg(args)?;
-    let mode = mode(args)?;
     let data_cells = if Path::new(input)
         .extension()
         .is_some_and(|x| x.eq_ignore_ascii_case("mem"))
     {
         Vec::new()
     } else {
-        assemble_source(input, mode)?
+        assemble_source(input)?
             .image
             .cells
             .into_iter()
             .filter(|cell| cell.kind != CellKind::Instruction)
             .collect::<Vec<_>>()
     };
-    let mut memory = load(input, mode)?;
-    let mut cpu = Cpu::new(mode);
+    let mut memory = load(input)?;
+    let mut cpu = Cpu::new();
     let mut bus = io_bus(args)?;
     let mut dbg = Debugger::new();
     println!("EX3 debugger; commands: s, r, b ADDR, regs, mem ADDR [N], data, disasm, q");

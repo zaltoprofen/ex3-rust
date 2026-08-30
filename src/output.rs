@@ -1,15 +1,15 @@
-//! 旧ツール互換の`.mem` / `.prb`シリアライズ。
+//! EX3 v3 `.mem` / `.prb` serialization.
 
 use crate::assembler::{CellKind, MemoryImage};
 use crate::isa::{Address, Word};
 use std::{error::Error, fmt};
 
-/// メモリイメージを`@aaa wwwwwwww`形式へ変換する。
+/// メモリイメージを`@aaaa wwwwwwww`形式へ変換する。
 pub fn format_mem(image: &MemoryImage) -> String {
     image
         .cells
         .iter()
-        .map(|c| format!("@{:03x} {:08x}\n", c.address.get(), c.word))
+        .map(|c| format!("@{:04x} {:08x}\n", c.address.get(), c.word))
         .collect()
 }
 /// データdirectiveだけを16 bit probe形式へ変換する。
@@ -103,7 +103,7 @@ mod tests {
                 },
             ],
         };
-        assert_eq!(format_mem(&i), "@020 00012345\n@021 00000001\n");
+        assert_eq!(format_mem(&i), "@0020 00012345\n@0021 00000001\n");
         assert_eq!(format_probe(&i), "00202345\nf0000000\n");
         assert_eq!(parse_mem(&format_mem(&i)).unwrap().len(), 2);
     }

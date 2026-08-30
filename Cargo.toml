@@ -2,7 +2,7 @@
 name = "ex3"
 version = "0.1.0"
 edition = "2021"
-description = "Assembler, emulator and debugger for the EX3 32-bit ISA"
+description = "Assembler, emulator and debugger for the EX3 v3.0 ISA"
 license = "MIT"
 
 [lib]
@@ -16,4 +16,3 @@ path = "src/main.rs"
 [profile.release]
 lto = true
 strip = true
-
