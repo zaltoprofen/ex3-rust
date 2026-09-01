@@ -1,46 +1,17 @@
 //! Compiler for the pointerless EX3 C v0.1 subset.
+mod ast;
 mod codegen;
+mod diagnostic;
 mod lexer;
 mod parser;
+mod sema;
 
-use std::{error::Error, fmt};
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Span {
-    pub line: usize,
-    pub column: usize,
-}
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CcError {
-    pub span: Span,
-    pub message: String,
-}
-impl CcError {
-    fn new(span: Span, message: impl Into<String>) -> Self {
-        Self {
-            span,
-            message: message.into(),
-        }
-    }
-}
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CcErrors(pub Vec<CcError>);
-impl fmt::Display for CcErrors {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (i, e) in self.0.iter().enumerate() {
-            if i > 0 {
-                writeln!(f)?
-            }
-            write!(f, "{}:{}: {}", e.span.line, e.span.column, e.message)?
-        }
-        Ok(())
-    }
-}
-impl Error for CcErrors {}
+pub use diagnostic::{CcError, CcErrors, Span};
 
 pub fn compile(source: &str) -> Result<String, CcErrors> {
     let tokens = lexer::lex(source).map_err(CcErrors)?;
-    let program = parser::parse(tokens).map_err(CcErrors)?;
+    let ast = parser::parse(tokens).map_err(CcErrors)?;
+    let program = sema::analyze(ast).map_err(CcErrors)?;
     codegen::generate(&program).map_err(CcErrors)
 }
 
@@ -145,6 +116,14 @@ mod tests {
     #[test]
     fn diagnostics_missing_return_and_bad_break() {
         assert!(compile("int main(void) { int x; x = 1; }").is_err());
+        assert!(compile("int main(void) { if (1) return 1; }").is_err());
+        assert!(compile("int main(void) { if (1) return 1; else return 2; }").is_ok());
+        assert!(compile("int main(void) { while (1) { return 1; } }").is_ok());
+        assert!(compile("int main(void) { switch (1) { case 1: return 1; } }").is_err());
+        assert!(
+            compile("int main(void) { switch (1) { case 1: return 1; default: return 2; } }")
+                .is_ok()
+        );
         assert!(compile("int main(void) { break; return 0; }").is_err());
         assert!(compile("int main(void) { unsigned x; return 0; }").is_err());
         assert!(compile("void putchar(int c); int main(void) { putchar(65); return 0; }").is_ok());
