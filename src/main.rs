@@ -8,12 +8,7 @@ use ex3::{
     output::{format_mem, format_probe, parse_mem},
 };
 use std::{
-    env,
-    error::Error,
-    fs,
-    io::{self, Write},
-    path::{Path, PathBuf},
-    process::ExitCode,
+    env, error::Error, fs, io::{self, Write}, path::{Path, PathBuf}, process::ExitCode,
 };
 
 // CLI層は引数とファイルI/Oだけを担当し、命令処理はlibraryへ委譲する。
@@ -35,6 +30,7 @@ fn real_main() -> Result<(), Box<dyn Error>> {
     let rest: Vec<String> = args.collect();
     match command.as_str() {
         "assemble" => assemble_cmd(&rest),
+        "cc" => cc_cmd(&rest),
         "check" => check_cmd(&rest),
         "run" => run_cmd(&rest),
         "debug" => debug_cmd(&rest),
@@ -51,7 +47,7 @@ fn real_main() -> Result<(), Box<dyn Error>> {
     }
 }
 fn print_help() {
-    println!("EX3 v3.0 assembler and emulator\n\nUsage:\n  ex3 assemble <file.asm> [-o file.mem] [--probe file.prb]\n  ex3 check <file.asm>\n  ex3 run <file.asm|file.mem> [--io null|legacy] [--seed N] [--max-steps N] [--trace] [--break ADDR]\n  ex3 debug <file.asm|file.mem> [--io null|legacy] [--seed N]\n  ex3 disasm --word <WORD>\n  ex3 disasm --file <file.mem>")
+    println!("EX3 v3.0 toolchain\n\nUsage:\n  ex3 cc <file.c> [-S] [-o output]\n  ex3 assemble <file.asm> [-o file.mem] [--probe file.prb]\n  ex3 check <file.asm>\n  ex3 run <file.asm|file.mem> [--io null|legacy] [--seed N] [--max-steps N] [--trace] [--break ADDR]\n  ex3 debug <file.asm|file.mem> [--io null|legacy] [--seed N]\n  ex3 disasm --word <WORD>\n  ex3 disasm --file <file.mem>")
 }
 
 // 外部crateに依存せず、小規模な`--option value`形式だけを扱う。
@@ -88,6 +84,15 @@ fn input_arg(args: &[String]) -> Result<&str, Box<dyn Error>> {
 enum RuntimeIoBus {
     Null(NullIoBus),
     Legacy(LegacyIoBus),
+}
+
+impl RuntimeIoBus {
+    fn output(&self, k: IoKind) -> &[u8] {
+        match self {
+            Self::Null(_) => &[],
+            Self::Legacy(bus) => bus.output(k),
+        }
+    }
 }
 
 impl IoBus for RuntimeIoBus {
@@ -140,8 +145,8 @@ fn io_bus(args: &[String]) -> Result<RuntimeIoBus, Box<dyn Error>> {
         .transpose()?
         .unwrap_or(0);
     match option(args, "--io").as_deref() {
-        None | Some("null") => Ok(RuntimeIoBus::Null(NullIoBus)),
-        Some("legacy") => Ok(RuntimeIoBus::Legacy(LegacyIoBus::new(seed))),
+        None | Some("legacy") => Ok(RuntimeIoBus::Legacy(LegacyIoBus::new(seed))),
+        Some("null") => Ok(RuntimeIoBus::Null(NullIoBus)),
         Some(value) => {
             Err(format!("invalid I/O backend `{value}`; expected null or legacy").into())
         }
@@ -170,6 +175,36 @@ fn assemble_cmd(args: &[String]) -> Result<(), Box<dyn Error>> {
         probe.display(),
         result.image.cells.len()
     );
+    Ok(())
+}
+fn cc_cmd(args: &[String]) -> Result<(), Box<dyn Error>> {
+    let input = input_arg(args)?;
+    let source = fs::read_to_string(input)?;
+    let assembly = ex3::cc::compile(&source)?;
+    let base = Path::new(input);
+    if flag(args, "-S") || flag(args, "--assembly") {
+        let output = option(args, "-o")
+            .or_else(|| option(args, "--output"))
+            .map(PathBuf::from)
+            .unwrap_or_else(|| base.with_extension("s"));
+        fs::write(&output, assembly)?;
+        println!("wrote {}", output.display());
+    } else {
+        let result = Assembler::new().assemble(&assembly)?;
+        let output = option(args, "-o")
+            .or_else(|| option(args, "--output"))
+            .map(PathBuf::from)
+            .unwrap_or_else(|| base.with_extension("mem"));
+        let probe = output.with_extension("prb");
+        fs::write(&output, format_mem(&result.image))?;
+        fs::write(&probe, format_probe(&result.image))?;
+        println!(
+            "wrote {} and {} ({} words)",
+            output.display(),
+            probe.display(),
+            result.image.cells.len()
+        );
+    }
     Ok(())
 }
 fn check_cmd(args: &[String]) -> Result<(), Box<dyn Error>> {
@@ -242,6 +277,12 @@ fn run_cmd(args: &[String]) -> Result<(), Box<dyn Error>> {
         cpu.step(&mut memory, &mut io)?;
         steps += cpu.state().executed_instructions - before;
     };
+    let sout = io.output(IoKind::Serial);
+    if sout.len() > 0 {
+        println!("===== Serial Output =====");
+        println!("{}", String::from_utf8_lossy(sout));
+        println!("=========================");
+    }
     println!("{}", format_registers(&cpu));
     match stop {
         RunStop::Halted => Ok(()),

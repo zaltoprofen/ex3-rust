@@ -1,6 +1,6 @@
 # EX3 v3 assembler / emulator (Rust)
 
-EX3 v3.0 ISA のアセンブラ、エミュレータ、デバッガです。v1/v2とのバイナリ・ソース互換性はありません。
+EX3 v3.0 ISA の C サブセットコンパイラ、アセンブラ、エミュレータ、デバッガです。v1/v2とのバイナリ・ソース互換性はありません。
 
 実装範囲:
 
@@ -15,6 +15,20 @@ EX3 v3.0 ISA のアセンブラ、エミュレータ、デバッガです。v1/v
 ```sh
 cargo build --release
 cargo test
+
+# Compile EX3 C v0.1 to a memory image (`program.mem` and `program.prb`)
+cargo run -- cc program.c
+
+# Stop after generating assembly, as with GCC's -S
+cargo run -- cc program.c -S -o program.s
+
+# Compile and run the recursive example
+cargo run -- cc examples/recursive_factorial.c
+cargo run -- run examples/recursive_factorial.mem
+
+# FizzBuzz using putchar, loops, division, and modulo
+cargo run -- cc examples/fizzbuzz.c
+cargo run -- run examples/fizzbuzz.mem --io legacy --max-steps 1000000
 
 # Assemble (`program.mem` and `program.prb` are produced)
 cargo run -- assemble program.asm
@@ -53,3 +67,6 @@ END
 `ADD`、`SUB`、`AND`、`OR`、`XOR`、`LDA`、`CMP`では、数値オペランドは即値、シンボルはメモリ参照です。数値のメモリアドレスを明示する場合は`@`を付けます。間接参照は末尾の大文字`I`で指定します。
 
 `.mem`は16-bitアドレスを使う`@aaaa wwwwwwww`形式です。CPUはリセット時に`PC=0x0010`、`SP=0x0000`から開始します。
+
+`CALL` / `RET`、ABIの引数配置、SP相対参照を組み合わせた例は
+[`examples/stack_call.asm`](examples/stack_call.asm)にあります。
