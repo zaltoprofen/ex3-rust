@@ -1,29 +1,26 @@
-use super::FunctionSignature;
+use super::{symbols::FunctionSignature, BuiltinId};
 use crate::cc::ast::Type;
 use std::collections::HashMap;
 
 pub(super) struct Builtin {
+    pub id: BuiltinId,
     pub name: &'static str,
-    pub assembly_name: &'static str,
     pub return_type: Type,
     pub parameter_types: &'static [Type],
-    pub needs_runtime: bool,
 }
 
 pub(super) const BUILTINS: &[Builtin] = &[
     Builtin {
+        id: BuiltinId::Putchar,
         name: "putchar",
-        assembly_name: "__ex3_putchar",
         return_type: Type::Void,
         parameter_types: &[Type::INT],
-        needs_runtime: true,
     },
     Builtin {
+        id: BuiltinId::Getchar,
         name: "getchar",
-        assembly_name: "__ex3_getchar",
         return_type: Type::INT,
         parameter_types: &[],
-        needs_runtime: true,
     },
 ];
 

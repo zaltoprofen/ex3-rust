@@ -105,7 +105,7 @@ impl Parser {
             let body = if self.eat_symbol(Symbol::Semicolon) {
                 None
             } else {
-                Some(self.statement()?)
+                Some(self.function_body()?)
             };
             Ok(Item::Function(Function {
                 name,
@@ -160,6 +160,16 @@ impl Parser {
             }
         }
         Ok(parameters)
+    }
+
+    fn function_body(&mut self) -> Result<Stmt, CcError> {
+        if !self.is_symbol(Symbol::LeftBrace) {
+            return Err(CcError::new(
+                self.peek().span,
+                "function body must be a compound statement",
+            ));
+        }
+        self.statement()
     }
 
     fn statement(&mut self) -> Result<Stmt, CcError> {

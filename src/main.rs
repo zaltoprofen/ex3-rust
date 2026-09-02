@@ -8,7 +8,12 @@ use ex3::{
     output::{format_mem, format_probe, parse_mem},
 };
 use std::{
-    env, error::Error, fs, io::{self, Write}, path::{Path, PathBuf}, process::ExitCode,
+    env,
+    error::Error,
+    fs,
+    io::{self, Write},
+    path::{Path, PathBuf},
+    process::ExitCode,
 };
 
 // CLI層は引数とファイルI/Oだけを担当し、命令処理はlibraryへ委譲する。
@@ -278,9 +283,12 @@ fn run_cmd(args: &[String]) -> Result<(), Box<dyn Error>> {
         steps += cpu.state().executed_instructions - before;
     };
     let sout = io.output(IoKind::Serial);
-    if sout.len() > 0 {
+    if !sout.is_empty() {
         println!("===== Serial Output =====");
-        println!("{}", String::from_utf8_lossy(sout));
+        print!("{}", String::from_utf8_lossy(sout));
+        if !sout.ends_with(b"\n") {
+            println!();
+        }
         println!("=========================");
     }
     println!("{}", format_registers(&cpu));

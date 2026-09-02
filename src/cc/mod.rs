@@ -8,11 +8,15 @@ mod sema;
 
 pub use diagnostic::{CcError, CcErrors, Span};
 
+pub(crate) fn is_implementation_reserved(name: &str) -> bool {
+    name.starts_with("__cc_") || name.starts_with("__ex3_")
+}
+
 pub fn compile(source: &str) -> Result<String, CcErrors> {
     let tokens = lexer::lex(source).map_err(CcErrors)?;
     let ast = parser::parse(tokens).map_err(CcErrors)?;
     let program = sema::analyze(ast).map_err(CcErrors)?;
-    codegen::generate(&program).map_err(CcErrors)
+    Ok(codegen::generate(&program))
 }
 
 #[cfg(test)]
@@ -124,9 +128,16 @@ mod tests {
             compile("int main(void) { switch (1) { case 1: return 1; default: return 2; } }")
                 .is_ok()
         );
+        assert!(compile("int main(void) { goto end; return 1; end: ; }").is_err());
+        assert!(compile(
+            "int main(void) { int x; switch (x) { case 1: goto end; default: return 1; } end: ; }"
+        )
+        .is_err());
+        assert!(compile("int main(void) { goto end; end: return 1; }").is_ok());
         assert!(compile("int main(void) { break; return 0; }").is_err());
         assert!(compile("int main(void) { unsigned x; return 0; }").is_err());
         assert!(compile("void putchar(int c); int main(void) { putchar(65); return 0; }").is_ok());
+        assert!(compile("void f(void) int x; int main(void) { return 0; }").is_err());
     }
 
     #[test]
@@ -150,5 +161,59 @@ mod tests {
         cpu.run(&mut memory, &mut io, 10_000).unwrap();
         assert_eq!(cpu.state().ac, 0xa5);
         assert_eq!(io.output(IoKind::Serial), &[0xa5]);
+    }
+
+    #[test]
+    fn nested_switch_and_while_target_the_innermost_control_flow() {
+        assert_eq!(
+            run(r#"
+                int main(void) {
+                    int i;
+                    int sum;
+                    i = 0;
+                    sum = 0;
+                    while (i < 4) {
+                        i = i + 1;
+                        switch (i) {
+                        case 1: continue;
+                        case 2: sum = sum + 10; break;
+                        default: sum = sum + 1;
+                        }
+                        sum = sum + 100;
+                    }
+                    return sum;
+                }
+            "#),
+            312
+        );
+    }
+
+    #[test]
+    fn pushed_arguments_preserve_nested_call_local_and_parameter_offsets() {
+        assert_eq!(
+            run(r#"
+                int add3(int a, int b, int c) { return a + b + c; }
+                int id(int x) { return x; }
+                int probe(int parameter) {
+                    int local;
+                    local = 7;
+                    return add3(local = 9, id(parameter), local + parameter);
+                }
+                int main(void) { return probe(5); }
+            "#),
+            26
+        );
+    }
+
+    #[test]
+    fn user_labels_are_mangled_per_function() {
+        assert_eq!(
+            run(r#"
+                int first(void) { goto done; done: return 1; }
+                int second(void) { goto done; done: return 2; }
+                int main(void) { return first() + second(); }
+            "#),
+            3
+        );
     }
 }

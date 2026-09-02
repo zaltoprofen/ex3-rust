@@ -1,8 +1,8 @@
 use super::{
     emitter::{BranchCondition, Emitter, Label, LabelFactory, LabelKind},
-    frame::{EvalContext, FrameLayout},
+    frame::{EvalContext, FrameLayout, StackAdjustment, StackOffset},
 };
-use crate::cc::sema::{ResolvedFunction, ResolvedVariable, StackAdjustment, StackOffset};
+use crate::cc::sema::{ResolvedFunction, ResolvedVariable};
 
 pub(super) struct GeneratedFunction {
     pub assembly: String,
@@ -10,6 +10,7 @@ pub(super) struct GeneratedFunction {
 }
 
 pub(super) struct FunctionGenerator<'a> {
+    pub(super) function: &'a ResolvedFunction,
     pub(super) emitter: Emitter,
     pub(super) labels: &'a mut LabelFactory,
     pub(super) frame: FrameLayout,
@@ -20,17 +21,14 @@ pub(super) struct FunctionGenerator<'a> {
 }
 
 impl<'a> FunctionGenerator<'a> {
-    pub(super) fn new(function: &ResolvedFunction, labels: &'a mut LabelFactory) -> Self {
-        let frame = FrameLayout::new(
-            function.local_count,
-            function.temporary_count,
-            function.parameter_count,
-        );
+    pub(super) fn new(function: &'a ResolvedFunction, labels: &'a mut LabelFactory) -> Self {
+        let frame = FrameLayout::plan(function);
         let return_label = labels.fresh(LabelKind::Return);
         let mut emitter = Emitter::default();
         emitter.symbol_label(&function.name);
         emitter.adjust_sp(-(frame.size() as isize));
         Self {
+            function,
             emitter,
             labels,
             frame,
@@ -41,8 +39,8 @@ impl<'a> FunctionGenerator<'a> {
         }
     }
 
-    pub(super) fn generate(mut self, function: &ResolvedFunction) -> GeneratedFunction {
-        self.generate_statement(&function.body);
+    pub(super) fn generate(mut self) -> GeneratedFunction {
+        self.generate_statement(&self.function.body);
         self.emitter.label(self.return_label);
         self.emitter.adjust_sp(self.frame.size() as isize);
         self.emitter.ret();

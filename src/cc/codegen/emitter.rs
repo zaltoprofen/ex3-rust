@@ -1,4 +1,5 @@
-use crate::cc::sema::{StackOffset, UserLabel};
+use super::frame::StackOffset;
+use crate::cc::sema::UserLabel;
 
 #[derive(Clone, Copy, Default)]
 pub(super) struct LabelId(usize);
@@ -153,8 +154,8 @@ impl Emitter {
     pub(super) fn label(&mut self, label: Label) {
         self.line(format!("{}:", label.render()));
     }
-    pub(super) fn user_label(&mut self, label: &UserLabel) {
-        self.line(format!("{}:", label.0));
+    pub(super) fn user_label(&mut self, function: &str, label: &UserLabel) {
+        self.line(format!("__cc_user_{function}_{}:", label.0));
     }
     pub(super) fn load_sp(&mut self, offset: StackOffset) {
         self.line(format!("LDSP {offset}"));
@@ -192,8 +193,8 @@ impl Emitter {
     pub(super) fn jump(&mut self, label: Label) {
         self.line(format!("JMP {}", label.render()));
     }
-    pub(super) fn jump_user(&mut self, label: &UserLabel) {
-        self.line(format!("JMP {}", label.0));
+    pub(super) fn jump_user(&mut self, function: &str, label: &UserLabel) {
+        self.line(format!("JMP __cc_user_{function}_{}", label.0));
     }
     pub(super) fn call(&mut self, symbol: &str) {
         self.line(format!("CALL {symbol}"));

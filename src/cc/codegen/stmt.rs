@@ -1,9 +1,9 @@
 use super::{
     emitter::{BranchCondition, Label, LabelKind},
-    frame::EvalContext,
+    frame::{EvalContext, StackAdjustment, StackOffset, TempSlot},
     function::FunctionGenerator,
 };
-use crate::cc::sema::{ResolvedExpr, ResolvedStmt, ResolvedSwitchPart, StackAdjustment, TempSlot};
+use crate::cc::sema::{ResolvedExpr, ResolvedStmt, ResolvedSwitchPart};
 
 impl FunctionGenerator<'_> {
     pub(super) fn generate_statement(&mut self, statement: &ResolvedStmt) {
@@ -23,9 +23,9 @@ impl FunctionGenerator<'_> {
             ResolvedStmt::Switch { expression, parts } => self.generate_switch(expression, parts),
             ResolvedStmt::Break => self.emitter.jump(*self.breaks.last().unwrap()),
             ResolvedStmt::Continue => self.emitter.jump(*self.continues.last().unwrap()),
-            ResolvedStmt::Goto(label) => self.emitter.jump_user(label),
+            ResolvedStmt::Goto(label) => self.emitter.jump_user(&self.function.name, label),
             ResolvedStmt::Label(label, body) => {
-                self.emitter.user_label(label);
+                self.emitter.user_label(&self.function.name, label);
                 self.generate_statement(body);
             }
             ResolvedStmt::Return(expression) => self.generate_return(expression.as_ref()),
@@ -123,7 +123,7 @@ impl FunctionGenerator<'_> {
         &mut self,
         parts: &[ResolvedSwitchPart],
         labels: &[Option<Label>],
-        slot: crate::cc::sema::StackOffset,
+        slot: StackOffset,
         fallback: Label,
     ) {
         for (part, label) in parts.iter().zip(labels) {

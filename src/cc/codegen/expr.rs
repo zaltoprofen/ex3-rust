@@ -1,11 +1,12 @@
 use super::{
+    builtins,
     emitter::{BranchCondition, LabelKind, StackBinaryOp},
     frame::EvalContext,
     function::FunctionGenerator,
 };
 use crate::cc::{
     ast::{BinOp, ScalarType, UnOp},
-    sema::{ResolvedExpr, ResolvedExprKind},
+    sema::{ResolvedCallee, ResolvedExpr, ResolvedExprKind},
 };
 
 impl FunctionGenerator<'_> {
@@ -29,13 +30,19 @@ impl FunctionGenerator<'_> {
                 rhs,
                 operand_type,
             } => self.generate_binary_expression(*op, lhs, rhs, *operand_type, context),
-            ResolvedExprKind::Call { function, args } => {
+            ResolvedExprKind::Call { callee, args } => {
                 for (pushed, argument) in args.iter().rev().enumerate() {
                     self.generate_expression(argument, context.after_pushes(pushed));
                     self.emitter.push();
                 }
-                self.uses_runtime |= function.needs_runtime;
-                self.emitter.call(&function.assembly_name);
+                match callee {
+                    ResolvedCallee::User(name) => self.emitter.call(name),
+                    ResolvedCallee::Builtin(id) => {
+                        let builtin = builtins::lookup(*id);
+                        self.uses_runtime |= builtin.needs_runtime;
+                        self.emitter.call(builtin.assembly_name);
+                    }
+                }
                 if !args.is_empty() {
                     self.emitter.adjust_sp(args.len() as isize);
                 }
