@@ -1,7 +1,4 @@
-use super::{
-    builtins, const_eval::evaluate as evaluate_constant, control_flow::definitely_returns,
-    UserLabel,
-};
+use super::{builtins, const_eval::evaluate as evaluate_constant, UserLabel};
 use crate::cc::{ast::*, is_implementation_reserved, CcError, Span};
 use std::collections::{HashMap, HashSet};
 
@@ -130,21 +127,6 @@ fn collect_function(
 }
 
 fn validate_function(function: &Function, body: &Stmt, errors: &mut Vec<CcError>) {
-    if function.ret != Type::Void && !definitely_returns(body) {
-        errors.push(CcError::new(
-            function.span,
-            format!(
-                "non-void function `{}` may reach the end without returning a value",
-                function.name
-            ),
-        ));
-    }
-    if count_locals(body) + function.params.len() + 3 > 32767 {
-        errors.push(CcError::new(
-            function.span,
-            "function stack frame is too large",
-        ));
-    }
     let mut parameters = HashSet::new();
     for parameter in &function.params {
         if !parameters.insert(&parameter.name) {
@@ -201,27 +183,6 @@ fn validate_switches(statement: &Stmt, errors: &mut Vec<CcError>) {
             }
         }
         _ => {}
-    }
-}
-
-pub(super) fn count_locals(statement: &Stmt) -> usize {
-    match &statement.kind {
-        StmtKind::Declaration { .. } => 1,
-        StmtKind::Block { statements } => statements.iter().map(count_locals).sum(),
-        StmtKind::If {
-            then_branch,
-            else_branch,
-            ..
-        } => count_locals(then_branch) + else_branch.as_deref().map(count_locals).unwrap_or(0),
-        StmtKind::While { body, .. } | StmtKind::Label { body, .. } => count_locals(body),
-        StmtKind::Switch { parts, .. } => parts
-            .iter()
-            .map(|part| match part {
-                SwitchPart::Statement { statement } => count_locals(statement),
-                _ => 0,
-            })
-            .sum(),
-        _ => 0,
     }
 }
 

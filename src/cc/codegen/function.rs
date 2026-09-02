@@ -21,8 +21,11 @@ pub(super) struct FunctionGenerator<'a> {
 }
 
 impl<'a> FunctionGenerator<'a> {
-    pub(super) fn new(function: &'a ResolvedFunction, labels: &'a mut LabelFactory) -> Self {
-        let frame = FrameLayout::plan(function);
+    pub(super) fn new(
+        function: &'a ResolvedFunction,
+        frame: FrameLayout,
+        labels: &'a mut LabelFactory,
+    ) -> Self {
         let return_label = labels.fresh(LabelKind::Return);
         let mut emitter = Emitter::default();
         emitter.symbol_label(&function.name);

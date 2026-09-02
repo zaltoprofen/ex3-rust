@@ -1,4 +1,7 @@
-use crate::cc::ast::{BinOp, ScalarType, Type, UnOp};
+use crate::cc::{
+    ast::{BinOp, ScalarType, Type, UnOp},
+    Span,
+};
 
 pub(crate) struct AnalyzedProgram {
     pub globals: Vec<ResolvedGlobal>,
@@ -14,7 +17,7 @@ pub(crate) struct ParamIndex(pub usize);
 #[derive(Clone, Debug)]
 pub(crate) struct GlobalSymbol(pub String);
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct UserLabel(pub usize);
 
 #[derive(Clone, Copy, Debug)]
@@ -109,6 +112,7 @@ pub(crate) struct ResolvedGlobal {
 
 pub(crate) struct ResolvedFunction {
     pub name: String,
+    pub span: Span,
     pub body: ResolvedStmt,
     pub local_count: usize,
     pub parameter_count: usize,

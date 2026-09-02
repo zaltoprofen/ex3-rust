@@ -1,8 +1,9 @@
 use super::{
     builtins,
     const_eval::evaluate as evaluate_constant,
+    control_flow::may_reach_function_end,
     ir::*,
-    symbols::{collect_labels, count_locals, FunctionSignature},
+    symbols::{collect_labels, FunctionSignature},
 };
 use crate::cc::{ast::*, CcError, Span};
 use std::collections::HashMap;
@@ -58,10 +59,21 @@ pub(super) fn resolve(
             continue_depth: 0,
         };
         let body = resolver.statement(body)?;
+        let local_count = resolver.next_local;
+        if function.ret != Type::Void && may_reach_function_end(&body) {
+            return Err(CcError::new(
+                function.span,
+                format!(
+                    "non-void function `{}` may reach the end without returning a value",
+                    function.name
+                ),
+            ));
+        }
         resolved_functions.push(ResolvedFunction {
             name: function.name.clone(),
+            span: function.span,
             body,
-            local_count: count_locals(function.body.as_ref().unwrap()),
+            local_count,
             parameter_count: function.params.len(),
         });
     }
