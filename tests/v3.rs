@@ -71,7 +71,13 @@ fn run_displays_serial_output() {
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(output.stdout.starts_with(b"A"));
+    assert!(
+        output
+            .stdout
+            .starts_with(b"===== Serial Output =====\nA\n=========================\n"),
+        "stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
 }
 
 #[test]
