@@ -1,13 +1,15 @@
 import Editor, { type OnMount } from "@monaco-editor/react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { editor as MonacoEditor } from "monaco-editor/esm/vs/editor/editor.api";
-import type { AssemblySourceMapRow } from "../ex3/types";
+import type { AssemblySourceMapRow, Diagnostic } from "../ex3/types";
 import "../monaco";
+import { useDiagnosticMarkers } from "./useDiagnosticMarkers";
 
 interface AssemblyViewProps {
   assembly: string;
   sourceMap: AssemblySourceMapRow[];
   currentLine: number | null;
+  diagnostics: Diagnostic[];
   breakpoints: number[];
   disabled: boolean;
   onToggleBreakpoint(address: number): void;
@@ -17,6 +19,7 @@ export function AssemblyView({
   assembly,
   sourceMap,
   currentLine,
+  diagnostics,
   breakpoints,
   disabled,
   onToggleBreakpoint,
@@ -29,6 +32,7 @@ export function AssemblyView({
   addressesByLineRef.current = addressesByLine;
   onToggleRef.current = onToggleBreakpoint;
   disabledRef.current = disabled;
+  useDiagnosticMarkers(editor, "ex3-assembler", diagnostics);
 
   const handleMount: OnMount = (instance, monaco) => {
     setEditor(instance);

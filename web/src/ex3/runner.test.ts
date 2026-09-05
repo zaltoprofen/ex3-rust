@@ -173,6 +173,7 @@ describe("machine runner", () => {
     });
 
     expect(next.phase).toBe("error");
+    expect(next.errorStage).toBe("compiler");
     expect(next.errorMessage).toBe("compile failed");
     expect(next.diagnostics).toEqual([
       { line: 2, column: 5, message: "expected expression" },

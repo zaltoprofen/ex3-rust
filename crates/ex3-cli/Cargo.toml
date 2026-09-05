@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 description = "Command-line tools for the EX3 v3.0 ISA"
 license.workspace = true
+repository.workspace = true
 
 [[bin]]
 name = "ex3"

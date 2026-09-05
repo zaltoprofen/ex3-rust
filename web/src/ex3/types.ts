@@ -112,6 +112,7 @@ export interface MachineUiState {
   serialOutput: string;
   breakpoints: number[];
   diagnostics: Diagnostic[];
+  errorStage: Ex3Error["stage"] | null;
   errorMessage: string | null;
   stopMessage: string | null;
   runInstructionCount: number;

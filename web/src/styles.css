@@ -52,6 +52,7 @@ button:disabled {
   display: flex;
   align-items: end;
   justify-content: space-between;
+  gap: 1rem;
 }
 
 .app-header h1,
@@ -77,6 +78,40 @@ button:disabled {
   font-weight: 800;
   letter-spacing: 0.14em;
   text-transform: uppercase;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.status-copy {
+  margin: 0;
+  white-space: nowrap;
+}
+
+.sample-picker {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  color: #91a4ba;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.sample-picker select {
+  max-width: 13rem;
+  border: 1px solid #3b5069;
+  border-radius: 0.35rem;
+  padding: 0.42rem 0.55rem;
+  color: #d7e9ff;
+  background: #111925;
+  font: inherit;
+}
+
+.sample-picker select:disabled {
+  opacity: 0.5;
 }
 
 .editor-grid,
@@ -362,6 +397,16 @@ th {
   background: #164f40;
 }
 
+.phase-running {
+  color: #d9efff;
+  background: #265f90;
+}
+
+.phase-paused {
+  color: #ffe7a2;
+  background: #66531d;
+}
+
 .phase-halted,
 .phase-error {
   color: #ffd4d4;
@@ -383,11 +428,36 @@ th {
   margin: 0;
 }
 
+.diagnostic-stage {
+  display: block;
+  margin-bottom: 0.35rem;
+  color: #ffadb6;
+  text-transform: uppercase;
+}
+
 .diagnostics ul {
   padding-left: 1.3rem;
 }
 
 @media (max-width: 850px) {
+  .app-header,
+  .header-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .header-actions {
+    gap: 0.6rem;
+  }
+
+  .sample-picker {
+    justify-content: space-between;
+  }
+
+  .sample-picker select {
+    flex: 1;
+  }
+
   .editor-grid,
   .machine-grid,
   .debug-grid,

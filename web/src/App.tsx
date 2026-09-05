@@ -19,6 +19,7 @@ import {
 } from "./ex3/runner";
 import type { Ex3SessionApi, MachineUiState } from "./ex3/types";
 import { getEx3Session } from "./ex3/wasm";
+import { SAMPLE_PROGRAMS } from "./samples";
 import { createInitialMachineState } from "./state/machine";
 
 const RUN_CHUNK_SIZE = 2_000;
@@ -83,6 +84,7 @@ export default function App() {
       phase: "running",
       runInstructionCount: 0,
       stopMessage: null,
+      errorStage: null,
       errorMessage: null,
     };
     commit(current);
@@ -157,6 +159,26 @@ export default function App() {
   };
 
   const controlsDisabled = machine.busy || machine.phase === "running";
+  const updateSource = (source: string) =>
+    commit({
+      ...machineRef.current,
+      source,
+      diagnostics: [],
+      errorStage: null,
+      errorMessage: null,
+      phase: machineRef.current.snapshot
+        ? machineRef.current.snapshot.halted
+          ? "halted"
+          : "ready"
+        : "empty",
+    });
+  const status = machine.busy
+    ? "Working…"
+    : session
+      ? "WASM ready"
+      : machine.phase === "error"
+        ? "WASM initialization failed"
+        : "Initializing WASM…";
 
   return (
     <main className="app-shell">
@@ -165,19 +187,46 @@ export default function App() {
           <p className="eyebrow">EX3 v3.0</p>
           <h1>Playground</h1>
         </div>
-        <p className="status-copy">{session ? "WASM ready" : "Initializing WASM…"}</p>
+        <div className="header-actions">
+          <label className="sample-picker">
+            Sample
+            <select
+              disabled={controlsDisabled}
+              defaultValue=""
+              onChange={(event) => {
+                const sample = SAMPLE_PROGRAMS.find(({ id }) => id === event.target.value);
+                if (sample) updateSource(sample.source);
+                event.target.value = "";
+              }}
+            >
+              <option value="" disabled>
+                Choose…
+              </option>
+              {SAMPLE_PROGRAMS.map((sample) => (
+                <option value={sample.id} key={sample.id}>
+                  {sample.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <p className="status-copy" role="status" aria-live="polite">
+            {status}
+          </p>
+        </div>
       </header>
 
       <div className="editor-grid">
         <SourceEditor
           value={machine.source}
+          diagnostics={machine.errorStage === "compiler" ? machine.diagnostics : []}
           disabled={controlsDisabled}
-          onChange={(source) => commit({ ...machineRef.current, source })}
+          onChange={updateSource}
         />
         <AssemblyView
           assembly={machine.assembly}
           sourceMap={machine.sourceMap}
           currentLine={machine.snapshot?.assemblyLine ?? null}
+          diagnostics={machine.errorStage === "assembler" ? machine.diagnostics : []}
           breakpoints={machine.breakpoints}
           disabled={controlsDisabled}
           onToggleBreakpoint={setBreakpoint}
@@ -197,7 +246,11 @@ export default function App() {
         onPause={pause}
       />
       {machine.stopMessage && <p className="stop-message">{machine.stopMessage}</p>}
-      <Diagnostics diagnostics={machine.diagnostics} message={machine.errorMessage} />
+      <Diagnostics
+        diagnostics={machine.diagnostics}
+        stage={machine.errorStage}
+        message={machine.errorMessage}
+      />
 
       <div className="machine-grid">
         <RegisterView snapshot={machine.snapshot} />
@@ -238,6 +291,7 @@ async function executeSingleOperation(
     ...current,
     busy: true,
     diagnostics: [],
+    errorStage: null,
     errorMessage: null,
     stopMessage: null,
   };

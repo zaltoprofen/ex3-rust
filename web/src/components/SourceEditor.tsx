@@ -1,13 +1,21 @@
 import Editor from "@monaco-editor/react";
+import { useState } from "react";
+import type { editor as MonacoEditor } from "monaco-editor/esm/vs/editor/editor.api";
+import type { Diagnostic } from "../ex3/types";
 import "../monaco";
+import { useDiagnosticMarkers } from "./useDiagnosticMarkers";
 
 interface SourceEditorProps {
   value: string;
+  diagnostics: Diagnostic[];
   disabled: boolean;
   onChange(value: string): void;
 }
 
-export function SourceEditor({ value, disabled, onChange }: SourceEditorProps) {
+export function SourceEditor({ value, diagnostics, disabled, onChange }: SourceEditorProps) {
+  const [editor, setEditor] = useState<MonacoEditor.IStandaloneCodeEditor | null>(null);
+  useDiagnosticMarkers(editor, "ex3-compiler", diagnostics);
+
   return (
     <section className="panel editor-panel" aria-label="C source editor">
       <h2>C Source</h2>
@@ -16,6 +24,7 @@ export function SourceEditor({ value, disabled, onChange }: SourceEditorProps) {
         language="c"
         theme="vs-dark"
         value={value}
+        onMount={setEditor}
         onChange={(next) => onChange(next ?? "")}
         options={{
           automaticLayout: true,

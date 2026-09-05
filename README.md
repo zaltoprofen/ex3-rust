@@ -70,3 +70,23 @@ END
 
 `CALL` / `RET`、ABIの引数配置、SP相対参照を組み合わせた例は
 [`examples/stack_call.asm`](examples/stack_call.asm)にあります。
+
+## Web Playground
+
+ブラウザ版はRust toolchain、`wasm-pack`、Node.js 22.12以降を使用してbuildします。
+
+```sh
+cd web
+npm ci
+npm run wasm:build
+npm run typecheck
+npm test
+npm run build
+```
+
+成果物は`web/dist/`内の静的ファイルだけで構成されます。`npm run preview`でproduction
+buildをローカル確認できます。
+
+GitHub Pagesへのdeploymentは`.github/workflows/pages.yml`が担当します。リポジトリの
+Settings → Pages → Build and deploymentでSourceを「GitHub Actions」に設定すると、`main`
+へのpush後に`https://zaltoprofen.github.io/ex3-rust/`へ配信されます。
