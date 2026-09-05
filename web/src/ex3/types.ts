@@ -11,6 +11,12 @@ export interface SymbolEntry {
   address: number;
 }
 
+export interface AssemblySourceMapRow {
+  address: number;
+  line: number;
+  executable: boolean;
+}
+
 export interface CpuSnapshot {
   pc: number;
   sp: number;
@@ -34,6 +40,7 @@ export interface CpuSnapshot {
 export interface CompileResult {
   assembly: string;
   symbols: SymbolEntry[];
+  sourceMap: AssemblySourceMapRow[];
   loadedWords: number;
   snapshot: CpuSnapshot;
 }
@@ -43,6 +50,27 @@ export interface StepResult {
   pcBefore: number | null;
   instruction: string | null;
   snapshot: CpuSnapshot;
+}
+
+export interface RunChunkResult {
+  status: "running" | "halted" | "breakpoint";
+  executed: number;
+  breakpointAddress: number | null;
+  snapshot: CpuSnapshot;
+}
+
+export interface MemoryRow {
+  address: number;
+  word: number;
+}
+
+export interface DisassemblyRow {
+  address: number;
+  word: number;
+  instruction: string;
+  valid: boolean;
+  sourceLine: number | null;
+  labels: string[];
 }
 
 export interface Diagnostic {
@@ -59,15 +87,32 @@ export interface Ex3Error {
 
 export interface Ex3SessionApi {
   compile_and_load(source: string): CompileResult;
+  reset(): CpuSnapshot;
   step(): StepResult;
+  run_chunk(maxInstructions: number): RunChunkResult;
+  memory_range(start: number, count: number): MemoryRow[];
+  disassembly_range(start: number, count: number): DisassemblyRow[];
+  toggle_breakpoint(address: number): boolean;
+  clear_breakpoints(): void;
+  breakpoints(): number[];
+  serial_output(): string;
 }
 
 export interface MachineUiState {
   source: string;
   assembly: string;
+  sourceMap: AssemblySourceMapRow[];
   phase: MachinePhase;
   busy: boolean;
   snapshot: CpuSnapshot | null;
+  disassembly: DisassemblyRow[];
+  stackMemory: MemoryRow[];
+  selectedMemory: MemoryRow[];
+  selectedMemoryAddress: number;
+  serialOutput: string;
+  breakpoints: number[];
   diagnostics: Diagnostic[];
   errorMessage: string | null;
+  stopMessage: string | null;
+  runInstructionCount: number;
 }

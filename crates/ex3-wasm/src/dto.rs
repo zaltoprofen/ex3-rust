@@ -5,8 +5,17 @@ use serde::Serialize;
 pub struct CompileResult {
     pub assembly: String,
     pub symbols: Vec<SymbolEntry>,
+    pub source_map: Vec<AssemblySourceMapRow>,
     pub loaded_words: u32,
     pub snapshot: CpuSnapshot,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssemblySourceMapRow {
+    pub address: u16,
+    pub line: usize,
+    pub executable: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]

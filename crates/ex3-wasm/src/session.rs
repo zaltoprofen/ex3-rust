@@ -1,12 +1,12 @@
 use crate::{
     dto::{
-        CompileResult, CpuSnapshot, DisassemblyRow, MemoryRow, RunChunkResult, RunStatus,
-        StepOutcomeDto, StepResult, SymbolEntry,
+        AssemblySourceMapRow, CompileResult, CpuSnapshot, DisassemblyRow, MemoryRow,
+        RunChunkResult, RunStatus, StepOutcomeDto, StepResult, SymbolEntry,
     },
     error::Ex3Error,
 };
 use ex3_core::{
-    assembler::{Assembler, AssemblySourceMapEntry},
+    assembler::{Assembler, AssemblySourceMapEntry, CellKind},
     cc,
     debugger::{Debugger, RunStop},
     emulator::{ArrayMemory, Cpu, DeterministicIoBus, IoKind, Memory, StepOutcome},
@@ -56,6 +56,17 @@ impl SessionCore {
             .map_err(Ex3Error::from)?;
         let loaded_words = u32::try_from(assembled.image.cells.len())
             .map_err(|_| Ex3Error::session("loaded word count exceeds u32"))?;
+        let source_map_rows = assembled
+            .source_map
+            .iter()
+            .map(|entry| AssemblySourceMapRow {
+                address: entry.address.get(),
+                line: entry.span.line,
+                executable: assembled.image.cells.iter().any(|cell| {
+                    cell.address == entry.address && cell.kind == CellKind::Instruction
+                }),
+            })
+            .collect();
         let memory = ArrayMemory::from_image(&assembled.image);
         let symbols = assembled.symbols;
         let source_map = assembled.source_map;
@@ -72,6 +83,7 @@ impl SessionCore {
         Ok(CompileResult {
             assembly,
             symbols: self.symbol_entries(),
+            source_map: source_map_rows,
             loaded_words,
             snapshot: self.snapshot()?,
         })
@@ -291,12 +303,25 @@ mod tests {
         let compiled = session.compile_and_load(RETURN_42).unwrap();
         assert!(!compiled.assembly.is_empty());
         assert!(compiled.loaded_words > 0);
+        assert!(!compiled.source_map.is_empty());
+        assert!(compiled.source_map.iter().any(|entry| entry.executable));
         assert_eq!(compiled.snapshot.pc, Address::RESET.get());
 
         let result = session.run_chunk(1_000_000).unwrap();
         assert_eq!(result.status, RunStatus::Halted);
         assert_eq!(result.snapshot.ac, 42);
         assert!(result.snapshot.halted);
+    }
+
+    #[test]
+    fn source_map_distinguishes_data_from_instructions() {
+        let mut session = SessionCore::new();
+        let compiled = session
+            .compile_and_load("int value = 7; int main(void) { return value; }")
+            .unwrap();
+
+        assert!(compiled.source_map.iter().any(|entry| entry.executable));
+        assert!(compiled.source_map.iter().any(|entry| !entry.executable));
     }
 
     #[test]

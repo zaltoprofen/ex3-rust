@@ -14,10 +14,19 @@ export function createInitialMachineState(): MachineUiState {
   return {
     source: INITIAL_SOURCE,
     assembly: "",
+    sourceMap: [],
     phase: "empty",
     busy: false,
     snapshot: null,
+    disassembly: [],
+    stackMemory: [],
+    selectedMemory: [],
+    selectedMemoryAddress: 0,
+    serialOutput: "",
+    breakpoints: [],
     diagnostics: [],
     errorMessage: null,
+    stopMessage: null,
+    runInstructionCount: 0,
   };
 }

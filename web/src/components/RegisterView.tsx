@@ -16,6 +16,8 @@ export function RegisterView({ snapshot }: RegisterViewProps) {
         ["IR", hex(snapshot.ir, 8)],
         ["PSR", hex(snapshot.psr, 8)],
         ["COUNT", snapshot.executedInstructions.toLocaleString()],
+        ["HALTED", snapshot.halted ? "yes" : "no"],
+        ["IRQ", snapshot.interruptPending ? "pending" : "none"],
       ]
     : [];
 
