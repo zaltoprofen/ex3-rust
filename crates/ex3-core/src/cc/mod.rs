@@ -1,11 +1,17 @@
 //! Compiler for the pointerless EX3 C v0.1 subset.
 mod ast;
 mod codegen;
+mod debug;
 mod diagnostic;
 mod lexer;
 mod parser;
 mod sema;
 
+pub use ast::ScalarType;
+pub use debug::{
+    Compilation, CompilerDebugInfo, FunctionDebugId, FunctionDebugSymbols, LocalDebugSymbol,
+    ParameterDebugSymbol,
+};
 pub use diagnostic::{CcError, CcErrors, Span};
 
 pub(crate) fn is_implementation_reserved(name: &str) -> bool {
@@ -13,11 +19,19 @@ pub(crate) fn is_implementation_reserved(name: &str) -> bool {
 }
 
 pub fn compile(source: &str) -> Result<String, CcErrors> {
+    Ok(compile_with_debug_info(source)?.assembly)
+}
+
+pub fn compile_with_debug_info(source: &str) -> Result<Compilation, CcErrors> {
     let tokens = lexer::lex(source).map_err(CcErrors)?;
     let ast = parser::parse(tokens).map_err(CcErrors)?;
     let program = sema::analyze(ast).map_err(CcErrors)?;
     let plan = codegen::plan(&program).map_err(CcErrors)?;
-    Ok(codegen::generate(&program, &plan))
+    let assembly = codegen::generate(&program, &plan);
+    Ok(Compilation {
+        assembly,
+        debug_info: program.debug_info,
+    })
 }
 
 #[cfg(test)]
@@ -47,6 +61,112 @@ mod tests {
             .into_iter()
             .map(|error| error.message)
             .collect()
+    }
+
+    #[test]
+    fn debug_symbols_preserve_parameter_local_names_types_and_shadowing() {
+        let compilation = compile_with_debug_info(
+            r#"
+                int add(int lhs, unsigned int rhs) {
+                    int value;
+                    int result;
+                    value = lhs;
+                    {
+                        unsigned int value;
+                        value = rhs;
+                    }
+                    result = value;
+                    return result;
+                }
+                int main(void) { return add(1, 2u); }
+            "#,
+        )
+        .unwrap();
+        let add = compilation
+            .debug_info
+            .functions
+            .iter()
+            .find(|function| function.name == "add")
+            .unwrap();
+
+        assert_eq!(add.id.index(), 0);
+        assert_eq!(
+            add.parameters,
+            [
+                ParameterDebugSymbol {
+                    index: 0,
+                    name: "lhs".into(),
+                    ty: ScalarType::Int32,
+                },
+                ParameterDebugSymbol {
+                    index: 1,
+                    name: "rhs".into(),
+                    ty: ScalarType::UInt32,
+                },
+            ]
+        );
+        assert_eq!(
+            add.locals,
+            [
+                LocalDebugSymbol {
+                    slot: 0,
+                    name: "value".into(),
+                    ty: ScalarType::Int32,
+                },
+                LocalDebugSymbol {
+                    slot: 1,
+                    name: "result".into(),
+                    ty: ScalarType::Int32,
+                },
+                LocalDebugSymbol {
+                    slot: 2,
+                    name: "value".into(),
+                    ty: ScalarType::UInt32,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn debug_symbols_include_definitions_but_not_prototypes_or_builtins() {
+        let compilation = compile_with_debug_info(
+            r#"
+                void putchar(int c);
+                int identity(int value);
+                int identity(int value) { return value; }
+                int main(void) { putchar(65); return identity(7); }
+            "#,
+        )
+        .unwrap();
+        let functions = &compilation.debug_info.functions;
+
+        assert_eq!(
+            functions
+                .iter()
+                .map(|function| (function.id.index(), function.name.as_str()))
+                .collect::<Vec<_>>(),
+            [(0, "identity"), (1, "main")]
+        );
+    }
+
+    #[test]
+    fn debug_compilation_preserves_assembly_and_memory_images() {
+        for source in [
+            "int main(void) { return 42; }",
+            "int add(int a, int b) { return a + b; } int main(void) { return add(3, 4); }",
+            "int main(void) { unsigned int value; value = 0xffffffffu; return value / 3u; }",
+        ] {
+            let assembly = compile(source).unwrap();
+            let with_debug = compile_with_debug_info(source).unwrap();
+            assert_eq!(assembly, with_debug.assembly, "source: {source}");
+
+            let plain_image = Assembler::new().assemble(&assembly).unwrap().image;
+            let debug_image = Assembler::new()
+                .assemble(&with_debug.assembly)
+                .unwrap()
+                .image;
+            assert_eq!(plain_image, debug_image, "source: {source}");
+        }
     }
 
     #[test]

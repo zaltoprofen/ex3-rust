@@ -5,7 +5,10 @@ use super::{
     ir::*,
     symbols::{collect_labels, FunctionSignature},
 };
-use crate::cc::{ast::*, CcError, Span};
+use crate::cc::{
+    ast::*, CcError, CompilerDebugInfo, FunctionDebugId, FunctionDebugSymbols, LocalDebugSymbol,
+    ParameterDebugSymbol, Span,
+};
 use std::collections::HashMap;
 
 pub(super) fn resolve(
@@ -32,6 +35,7 @@ pub(super) fn resolve(
         })
         .collect();
     let mut resolved_functions = Vec::new();
+    let mut debug_functions = Vec::new();
     for item in &ast.items {
         let Item::Function(function) = item else {
             continue;
@@ -40,6 +44,20 @@ pub(super) fn resolve(
             continue;
         };
         let labels = collect_labels(body)?;
+        let function_id = FunctionDebugId::new(resolved_functions.len());
+        let parameter_debug_symbols = function
+            .params
+            .iter()
+            .enumerate()
+            .map(|(index, parameter)| ParameterDebugSymbol {
+                index,
+                name: parameter.name.clone(),
+                ty: parameter
+                    .ty
+                    .scalar()
+                    .expect("parameter types were validated as scalar"),
+            })
+            .collect();
         let mut resolver = Resolver {
             globals,
             functions,
@@ -53,6 +71,7 @@ pub(super) fn resolve(
                 .collect(),
             scopes: Vec::new(),
             next_local: 0,
+            debug_locals: Vec::new(),
             return_type: function.ret,
             labels,
             break_depth: 0,
@@ -60,6 +79,7 @@ pub(super) fn resolve(
         };
         let body = resolver.statement(body)?;
         let local_count = resolver.next_local;
+        let local_debug_symbols = resolver.debug_locals;
         if function.ret != Type::Void && may_reach_function_end(&body) {
             return Err(CcError::new(
                 function.span,
@@ -76,10 +96,19 @@ pub(super) fn resolve(
             local_count,
             parameter_count: function.params.len(),
         });
+        debug_functions.push(FunctionDebugSymbols {
+            id: function_id,
+            name: function.name.clone(),
+            parameters: parameter_debug_symbols,
+            locals: local_debug_symbols,
+        });
     }
     Ok(AnalyzedProgram {
         globals: resolved_globals,
         functions: resolved_functions,
+        debug_info: CompilerDebugInfo {
+            functions: debug_functions,
+        },
     })
 }
 
@@ -89,6 +118,7 @@ struct Resolver<'a> {
     parameters: HashMap<String, (ParamIndex, Type)>,
     scopes: Vec<HashMap<String, (LocalSlot, Type)>>,
     next_local: usize,
+    debug_locals: Vec<LocalDebugSymbol>,
     return_type: Type,
     labels: HashMap<String, UserLabel>,
     break_depth: usize,
@@ -267,6 +297,11 @@ impl Resolver<'_> {
                 }
                 let slot = LocalSlot(self.next_local);
                 self.next_local += 1;
+                self.debug_locals.push(LocalDebugSymbol {
+                    slot: slot.0,
+                    name: name.clone(),
+                    ty: ty.scalar().expect("local types were validated as scalar"),
+                });
                 self.scopes
                     .last_mut()
                     .expect("scope existence was checked above")
