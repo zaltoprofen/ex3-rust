@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/ex3-core",
     "crates/ex3-cli",
+    "crates/ex3-wasm",
 ]
 
 [workspace.package]
