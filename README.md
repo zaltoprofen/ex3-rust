@@ -1,45 +1,92 @@
-# EX3 assembler / emulator (Rust)
+# EX3 v3 assembler / emulator (Rust)
 
-EX3 32-bit ISA のリファレンス・アセンブラ、エミュレータ、デバッガです。仕様書に基づき、命令の encode/decode、2パスシンボル解決、`.mem` / `.prb`、I/O、割り込みを実装しています。
+EX3 v3.0 ISA の C サブセットコンパイラ、アセンブラ、エミュレータ、デバッガです。v1/v2とのバイナリ・ソース互換性はありません。
 
-## Opcode layout
+実装範囲:
 
-命令語は `format[31:29] + opcode[28:24] + payload[23:0]` の新形式を使用します。同じmnemonicは、対応するオペランド形式間で共通opcodeを持ちます。間接アドレッシングは独立bitではなくformatに含まれます。
-
-この変更はアセンブリソース互換ですが、旧32bit形式との機械語互換性はありません。旧`.mem`、ROM初期化データ、ハードコードされた命令語は、現在のアセンブラで再生成してください。decoderは旧形式を自動判別しません。
+- 32-bit固定長命令（`format[31:29] + opcode[28:24] + modifier[23:16] + operand[15:0]`）
+- 64Kワードの統合メモリ、16-bit `PC` / `SP`
+- MEM（直接・間接）、IMM、SPREL、BRANCH、SYSの全v3形式
+- `NZCV` / `IEN`を含む`PSR`
+- スタック式`CALL` / `RET`、`PUSH` / `POP`擬似命令
+- ハードウェア割り込みフレームと`IRET`
+- シリアル・パラレルI/O
 
 ```sh
 cargo build --release
 cargo test
 
+# Compile EX3 C v0.1 to a memory image (`program.mem` and `program.prb`)
+cargo run -- cc program.c
+
+# Stop after generating assembly, as with GCC's -S
+cargo run -- cc program.c -S -o program.s
+
+# Compile and run the recursive example
+cargo run -- cc examples/recursive_factorial.c
+cargo run -- run examples/recursive_factorial.mem
+
+# FizzBuzz using putchar, loops, division, and modulo
+cargo run -- cc examples/fizzbuzz.c
+cargo run -- run examples/fizzbuzz.mem --io legacy --max-steps 1000000
+
 # Assemble (`program.mem` and `program.prb` are produced)
 cargo run -- assemble program.asm
 
-# Validate, execute, or debug
+# Validate, execute, debug, or disassemble
 cargo run -- check program.asm
 cargo run -- run program.asm --max-steps 100000 --trace
-cargo run -- run program.asm --compat legacy --io legacy --seed 1234
 cargo run -- debug program.mem
-cargo run -- disasm --word 0x85000001
+cargo run -- disasm --word 0x2500ffff
 ```
 
-## 互換モード
+## Assembly syntax
 
-`--compat strict`（既定）はRust版のEX3リファレンス動作です。旧Scalaエミュレータで確認されている以下の問題を修正しています。
+ラベルは`LABEL:`または`LABEL,`、コメントは`;`または`/`を使用できます。`END`は任意です。
 
-- JZA/JNAのdispatch
-- CIRの論理右シフト
-- 入力byteのゼロ拡張
-- 32 bit加減算のcarry/borrow
-- 間接アドレスの12 bit化
+```asm
+ORG 0x0000
+JMP IRQ_HANDLER
 
-`--compat legacy` は、旧Scala実装のCPUおよび周辺機器について、主要な観測可能挙動を回帰比較用に再現します。旧パーサの不正入力処理やすべての境界的なソース構文について、完全互換を保証するものではありません。
+ORG 0x0010
+START:
+    LDA -1          ; immediate (sign-extended)
+    LDA VALUE       ; direct memory
+    LDA POINTER I   ; indirect memory
+    LDA @0x2000     ; numeric direct memory address
+    LDSP 2          ; M[SP+2]
+    PUSH            ; ADJSP -1 / STSP 0
+    POP             ; LDSP 0 / ADJSP 1
+    HLT
 
-## I/O backend
+VALUE:   HEX 12345678
+POINTER: SYM VALUE
+END
+```
 
-- `--io null`（既定）: 入力なし、出力破棄
-- `--io legacy`: 旧Scala版のready、mask、IEN停止タイミングを再現
+`ADD`、`SUB`、`AND`、`OR`、`XOR`、`LDA`、`CMP`では、数値オペランドは即値、シンボルはメモリ参照です。数値のメモリアドレスを明示する場合は`@`を付けます。間接参照は末尾の大文字`I`で指定します。
 
-`--seed N` はlegacy I/Oの入力ready間隔を決定論的にします。同じプログラム、入力、seedでは同じタイミングになります。
+`.mem`は16-bitアドレスを使う`@aaaa wwwwwwww`形式です。CPUはリセット時に`PC=0x0010`、`SP=0x0000`から開始します。
 
-アセンブリは `END` 必須です。PC は `0x010` から開始し、既定の実行上限は 10,000,000 命令です。
+`CALL` / `RET`、ABIの引数配置、SP相対参照を組み合わせた例は
+[`examples/stack_call.asm`](examples/stack_call.asm)にあります。
+
+## Web Playground
+
+ブラウザ版はRust toolchain、`wasm-pack`、Node.js 22.12以降を使用してbuildします。
+
+```sh
+cd web
+npm ci
+npm run wasm:build
+npm run typecheck
+npm test
+npm run build
+```
+
+成果物は`web/dist/`内の静的ファイルだけで構成されます。`npm run preview`でproduction
+buildをローカル確認できます。
+
+GitHub Pagesへのdeploymentは`.github/workflows/pages.yml`が担当します。リポジトリの
+Settings → Pages → Build and deploymentでSourceを「GitHub Actions」に設定すると、`main`
+へのpush後に`https://zaltoprofen.github.io/ex3-rust/`へ配信されます。

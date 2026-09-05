@@ -80,15 +80,20 @@ pub fn format_registers(cpu: &Cpu) -> String {
     let s = cpu.state();
     let io = cpu.io_state();
     format!(
-        "PC={:03x} AC={:08x} E={} IR={:08x} count={} halted={} IRQ={} IEN={} IMSK={:x} port={}",
+        "PC={:04x} SP={:04x} AC={:08x} PSR={:02x} [I={} N={} Z={} C={} V={}] IR={:08x} count={} halted={} IRQ={} IMSK={:x} port={}",
         s.pc.get(),
+        s.sp.get(),
         s.ac,
-        u8::from(s.e),
+        s.psr,
+        u8::from(s.interrupt_enabled()),
+        u8::from(s.negative()),
+        u8::from(s.zero()),
+        u8::from(s.carry()),
+        u8::from(s.overflow()),
         s.ir,
         s.executed_instructions,
         s.halted,
         s.interrupt_pending,
-        io.interrupt_enabled,
         io.interrupt_mask,
         if io.serial_selected {
             "serial"
@@ -103,8 +108,8 @@ pub fn format_current(cpu: &Cpu, memory: &impl Memory) -> String {
     let pc = cpu.state().pc;
     let word = memory.read(pc);
     match decode(word) {
-        Ok(i) => format!("@{:03x} {:08x}  {i}", pc.get(), word),
-        Err(_) => format!("@{:03x} {:08x}  <invalid>", pc.get(), word),
+        Ok(i) => format!("@{:04x} {:08x}  {i}", pc.get(), word),
+        Err(_) => format!("@{:04x} {:08x}  <invalid>", pc.get(), word),
     }
 }
 
@@ -113,16 +118,13 @@ mod tests {
     use super::*;
     use crate::{
         emulator::{ArrayMemory, NullIoBus},
-        isa::{Instruction, NoOperandOp},
+        isa::{Instruction, SystemOp},
     };
     #[test]
     fn breakpoint_stops_before_fetch() {
         let mut c = Cpu::default();
         let mut m = ArrayMemory::default();
-        m.write(
-            Address::RESET,
-            Instruction::NoOperand(NoOperandOp::Hlt).encode(),
-        );
+        m.write(Address::RESET, Instruction::System(SystemOp::Hlt).encode());
         let mut io = NullIoBus;
         let mut d = Debugger::new();
         d.add_breakpoint(Address::RESET);
