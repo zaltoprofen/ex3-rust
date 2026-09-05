@@ -1,16 +1,23 @@
 use super::{
+    builtins,
     emitter::{BranchCondition, Emitter, Label, LabelFactory, LabelKind},
     frame::{EvalContext, FrameLayout, StackAdjustment, StackOffset},
 };
-use crate::cc::sema::{ResolvedFunction, ResolvedVariable};
+use crate::cc::{
+    ast::{BinOp, UnOp},
+    sema::{ResolvedCallee, ResolvedExpr, ResolvedExprKind, ResolvedFunction, ResolvedVariable},
+    EmitDebugContext, FunctionDebugSymbols, GeneratedAssembly,
+};
 
 pub(super) struct GeneratedFunction {
-    pub assembly: String,
+    pub assembly: GeneratedAssembly,
     pub uses_runtime: bool,
 }
 
 pub(super) struct FunctionGenerator<'a> {
     pub(super) function: &'a ResolvedFunction,
+    pub(super) debug_symbols: &'a FunctionDebugSymbols,
+    pub(super) all_debug_symbols: &'a [FunctionDebugSymbols],
     pub(super) emitter: Emitter,
     pub(super) labels: &'a mut LabelFactory,
     pub(super) frame: FrameLayout,
@@ -24,14 +31,24 @@ impl<'a> FunctionGenerator<'a> {
     pub(super) fn new(
         function: &'a ResolvedFunction,
         frame: FrameLayout,
+        debug_symbols: &'a FunctionDebugSymbols,
+        all_debug_symbols: &'a [FunctionDebugSymbols],
         labels: &'a mut LabelFactory,
     ) -> Self {
         let return_label = labels.fresh(LabelKind::Return);
         let mut emitter = Emitter::default();
         emitter.symbol_label(&function.name);
+        emitter.set_debug_context(EmitDebugContext {
+            function_id: debug_symbols.id,
+            frame_base_delta: -i32::try_from(frame.size()).expect("frame size exceeds i32"),
+            active_temporaries: Vec::new(),
+            dynamic_stack_slots: Vec::new(),
+        });
         emitter.adjust_sp(-(frame.size() as isize));
         Self {
             function,
+            debug_symbols,
+            all_debug_symbols,
             emitter,
             labels,
             frame,
@@ -43,9 +60,17 @@ impl<'a> FunctionGenerator<'a> {
     }
 
     pub(super) fn generate(mut self) -> GeneratedFunction {
+        self.sync_debug(&EvalContext::root());
         self.generate_statement(&self.function.body);
         self.emitter.label(self.return_label);
+        self.sync_debug(&EvalContext::root());
         self.emitter.adjust_sp(self.frame.size() as isize);
+        self.emitter.set_debug_context(EmitDebugContext {
+            function_id: self.debug_symbols.id,
+            frame_base_delta: -i32::try_from(self.frame.size()).expect("frame size exceeds i32"),
+            active_temporaries: Vec::new(),
+            dynamic_stack_slots: Vec::new(),
+        });
         self.emitter.ret();
         GeneratedFunction {
             assembly: self.emitter.finish(),
@@ -57,7 +82,12 @@ impl<'a> FunctionGenerator<'a> {
         self.labels.fresh(kind)
     }
 
-    pub(super) fn temporary_offset(&self, context: EvalContext) -> StackOffset {
+    pub(super) fn sync_debug(&mut self, context: &EvalContext) {
+        self.emitter
+            .set_debug_context(context.emit_debug_context(self.debug_symbols.id));
+    }
+
+    pub(super) fn temporary_offset(&self, context: &EvalContext) -> StackOffset {
         self.frame
             .temporary_offset(context.temporary(), context.adjustment())
     }
@@ -114,5 +144,94 @@ impl<'a> FunctionGenerator<'a> {
         self.emitter.label(yes);
         self.emitter.load_immediate(1);
         self.emitter.label(end);
+    }
+
+    pub(super) fn describe_expression(&self, expression: &ResolvedExpr) -> String {
+        match &expression.kind {
+            ResolvedExprKind::Number(value) => value.to_string(),
+            ResolvedExprKind::Load(variable) => self.variable_name(variable),
+            ResolvedExprKind::Assign { target, value } => {
+                format!(
+                    "({} = {})",
+                    self.variable_name(target),
+                    self.describe_expression(value)
+                )
+            }
+            ResolvedExprKind::Call { callee, args } => {
+                let name = match callee {
+                    ResolvedCallee::User(name) => name.as_str(),
+                    ResolvedCallee::Builtin(id) => builtins::lookup(*id).assembly_name,
+                };
+                let arguments = args
+                    .iter()
+                    .map(|argument| self.describe_expression(argument))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("{name}({arguments})")
+            }
+            ResolvedExprKind::Unary { op, operand } => {
+                format!(
+                    "({}{})",
+                    unary_symbol(*op),
+                    self.describe_expression(operand)
+                )
+            }
+            ResolvedExprKind::Binary { op, lhs, rhs, .. } => format!(
+                "({} {} {})",
+                self.describe_expression(lhs),
+                binary_symbol(*op),
+                self.describe_expression(rhs)
+            ),
+        }
+    }
+
+    fn variable_name(&self, variable: &ResolvedVariable) -> String {
+        match variable {
+            ResolvedVariable::Local(slot) => self
+                .debug_symbols
+                .locals
+                .iter()
+                .find(|local| local.slot == slot.0)
+                .map(|local| local.name.clone())
+                .unwrap_or_else(|| format!("local #{}", slot.0)),
+            ResolvedVariable::Parameter(index) => self
+                .debug_symbols
+                .parameters
+                .iter()
+                .find(|parameter| parameter.index == index.0)
+                .map(|parameter| parameter.name.clone())
+                .unwrap_or_else(|| format!("parameter #{}", index.0)),
+            ResolvedVariable::Global(symbol) => symbol.0.clone(),
+        }
+    }
+}
+
+fn unary_symbol(operator: UnOp) -> &'static str {
+    match operator {
+        UnOp::BitNot => "~",
+        UnOp::Not => "!",
+        UnOp::Plus => "+",
+        UnOp::Neg => "-",
+    }
+}
+
+fn binary_symbol(operator: BinOp) -> &'static str {
+    match operator {
+        BinOp::Mul => "*",
+        BinOp::Div => "/",
+        BinOp::Mod => "%",
+        BinOp::Add => "+",
+        BinOp::Sub => "-",
+        BinOp::Lt => "<",
+        BinOp::Le => "<=",
+        BinOp::Gt => ">",
+        BinOp::Ge => ">=",
+        BinOp::Eq => "==",
+        BinOp::Ne => "!=",
+        BinOp::BitAnd => "&",
+        BinOp::BitXor => "^",
+        BinOp::BitOr => "|",
+        BinOp::And => "&&",
+        BinOp::Or => "||",
     }
 }

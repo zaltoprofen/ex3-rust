@@ -4,6 +4,7 @@ use super::{
     function::FunctionGenerator,
 };
 use crate::cc::sema::{ResolvedExpr, ResolvedStmt, ResolvedSwitchPart};
+use crate::cc::TemporaryRole;
 
 impl FunctionGenerator<'_> {
     pub(super) fn generate_statement(&mut self, statement: &ResolvedStmt) {
@@ -21,9 +22,18 @@ impl FunctionGenerator<'_> {
             } => self.generate_if(condition, then_stmt, else_stmt.as_deref()),
             ResolvedStmt::While { condition, body } => self.generate_while(condition, body),
             ResolvedStmt::Switch { expression, parts } => self.generate_switch(expression, parts),
-            ResolvedStmt::Break => self.emitter.jump(*self.breaks.last().unwrap()),
-            ResolvedStmt::Continue => self.emitter.jump(*self.continues.last().unwrap()),
-            ResolvedStmt::Goto(label) => self.emitter.jump_user(&self.function.name, label),
+            ResolvedStmt::Break => {
+                self.sync_debug(&EvalContext::root());
+                self.emitter.jump(*self.breaks.last().unwrap());
+            }
+            ResolvedStmt::Continue => {
+                self.sync_debug(&EvalContext::root());
+                self.emitter.jump(*self.continues.last().unwrap());
+            }
+            ResolvedStmt::Goto(label) => {
+                self.sync_debug(&EvalContext::root());
+                self.emitter.jump_user(&self.function.name, label);
+            }
             ResolvedStmt::Label(label, body) => {
                 self.emitter.user_label(&self.function.name, label);
                 self.generate_statement(body);
@@ -45,6 +55,7 @@ impl FunctionGenerator<'_> {
     ) {
         if let Some(initializer) = initializer {
             self.generate_expression(initializer, EvalContext::root());
+            self.sync_debug(&EvalContext::root());
             self.emitter
                 .store_sp(self.frame.local_offset(slot, StackAdjustment(0)));
         }
@@ -59,9 +70,11 @@ impl FunctionGenerator<'_> {
         let else_label = self.fresh_label(LabelKind::Else);
         let end = self.fresh_label(LabelKind::IfEnd);
         self.generate_expression(condition, EvalContext::root());
+        self.sync_debug(&EvalContext::root());
         self.emitter.compare_zero();
         self.emitter.branch(BranchCondition::Equal, else_label);
         self.generate_statement(then_stmt);
+        self.sync_debug(&EvalContext::root());
         self.emitter.jump(end);
         self.emitter.label(else_label);
         if let Some(statement) = else_stmt {
@@ -75,6 +88,7 @@ impl FunctionGenerator<'_> {
         let end = self.fresh_label(LabelKind::WhileEnd);
         self.emitter.label(top);
         self.generate_expression(condition, EvalContext::root());
+        self.sync_debug(&EvalContext::root());
         self.emitter.compare_zero();
         self.emitter.branch(BranchCondition::Equal, end);
         self.breaks.push(end);
@@ -82,6 +96,7 @@ impl FunctionGenerator<'_> {
         self.generate_statement(body);
         self.continues.pop();
         self.breaks.pop();
+        self.sync_debug(&EvalContext::root());
         self.emitter.jump(top);
         self.emitter.label(end);
     }
@@ -90,13 +105,19 @@ impl FunctionGenerator<'_> {
         if let Some(expression) = expression {
             self.generate_expression(expression, EvalContext::root());
         }
+        self.sync_debug(&EvalContext::root());
         self.emitter.jump(self.return_label);
     }
 
     fn generate_switch(&mut self, expression: &ResolvedExpr, parts: &[ResolvedSwitchPart]) {
         self.generate_expression(expression, EvalContext::root());
         let slot = self.frame.temporary_offset(TempSlot(0), StackAdjustment(0));
+        self.sync_debug(&EvalContext::root());
         self.emitter.store_sp(slot);
+        let switch_context = EvalContext::root().with_active_temporary(
+            TemporaryRole::SwitchValue,
+            format!("switch value: {}", self.describe_expression(expression)),
+        );
         let end = self.fresh_label(LabelKind::SwitchEnd);
         let mut labels = Vec::with_capacity(parts.len());
         let mut default = None;
@@ -112,8 +133,15 @@ impl FunctionGenerator<'_> {
             };
             labels.push(label);
         }
-        self.emit_switch_dispatch(parts, &labels, slot, default.unwrap_or(end));
+        self.emit_switch_dispatch(
+            parts,
+            &labels,
+            slot,
+            default.unwrap_or(end),
+            &switch_context,
+        );
         self.breaks.push(end);
+        self.sync_debug(&EvalContext::root());
         self.emit_switch_body(parts, labels);
         self.breaks.pop();
         self.emitter.label(end);
@@ -125,14 +153,17 @@ impl FunctionGenerator<'_> {
         labels: &[Option<Label>],
         slot: StackOffset,
         fallback: Label,
+        context: &EvalContext,
     ) {
         for (part, label) in parts.iter().zip(labels) {
             if let ResolvedSwitchPart::Case(value) = part {
+                self.sync_debug(context);
                 self.load_constant(*value);
                 self.emitter.compare_sp(slot);
                 self.emitter.branch(BranchCondition::Equal, label.unwrap());
             }
         }
+        self.sync_debug(context);
         self.emitter.jump(fallback);
     }
 

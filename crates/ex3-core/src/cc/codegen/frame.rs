@@ -4,8 +4,9 @@ use crate::cc::{
         LocalSlot, ParamIndex, ResolvedExpr, ResolvedExprKind, ResolvedFunction, ResolvedStmt,
         ResolvedSwitchPart,
     },
-    FunctionDebugSymbols, FunctionFrameDebugInfo, LocalSlotDebugInfo, ParameterSlotDebugInfo,
-    ReturnAddressSlotDebugInfo,
+    ActiveTemporaryDebugInfo, DynamicStackSlotDebugInfo, DynamicStackSlotKind, EmitDebugContext,
+    FunctionDebugId, FunctionDebugSymbols, FunctionFrameDebugInfo, LocalSlotDebugInfo,
+    ParameterSlotDebugInfo, ReturnAddressSlotDebugInfo, ScalarType, TemporaryRole,
 };
 use std::fmt;
 
@@ -313,10 +314,12 @@ fn maximum_dynamic_slots_statement(statement: &ResolvedStmt) -> usize {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) struct EvalContext {
     temporary: TempSlot,
     adjustment: StackAdjustment,
+    active_temporaries: Vec<ActiveTemporaryDebugInfo>,
+    dynamic_stack_slots: Vec<DynamicStackSlotDebugInfo>,
 }
 
 impl EvalContext {
@@ -324,35 +327,63 @@ impl EvalContext {
         Self {
             temporary: TempSlot(0),
             adjustment: StackAdjustment(0),
+            active_temporaries: Vec::new(),
+            dynamic_stack_slots: Vec::new(),
         }
     }
 
-    pub(super) fn next_temp(self) -> Self {
-        Self {
-            temporary: TempSlot(self.temporary.0 + 1),
-            ..self
-        }
-    }
-
-    pub(super) fn after_push(self) -> Self {
-        Self {
-            adjustment: StackAdjustment(self.adjustment.0 + 1),
-            ..self
-        }
-    }
-
-    pub(super) fn after_pushes(mut self, count: usize) -> Self {
-        for _ in 0..count {
-            self = self.after_push();
-        }
+    pub(super) fn next_temp(mut self) -> Self {
+        self.temporary = TempSlot(self.temporary.0 + 1);
         self
     }
 
-    pub(super) fn temporary(self) -> TempSlot {
+    pub(super) fn with_active_temporary(
+        mut self,
+        role: TemporaryRole,
+        display_name: String,
+    ) -> Self {
+        self.active_temporaries.push(ActiveTemporaryDebugInfo {
+            slot: u16::try_from(self.temporary.0).expect("temporary slot exceeds u16"),
+            role,
+            display_name,
+        });
+        self
+    }
+
+    pub(super) fn with_dynamic_slot(
+        mut self,
+        kind: DynamicStackSlotKind,
+        display_name: String,
+        ty: Option<ScalarType>,
+    ) -> Self {
+        self.adjustment = StackAdjustment(self.adjustment.0 + 1);
+        self.dynamic_stack_slots.push(DynamicStackSlotDebugInfo {
+            frame_offset: -i32::try_from(self.adjustment.0)
+                .expect("dynamic stack offset exceeds i32"),
+            kind,
+            display_name,
+            ty,
+        });
+        self
+    }
+
+    pub(super) fn emit_debug_context(&self, function_id: FunctionDebugId) -> EmitDebugContext {
+        EmitDebugContext {
+            function_id,
+            // A PUSH decrements SP, so the canonical frame SP is this many
+            // words above the current SP until the dynamic slots are cleaned up.
+            frame_base_delta: i32::try_from(self.adjustment.0)
+                .expect("stack adjustment exceeds i32"),
+            active_temporaries: self.active_temporaries.clone(),
+            dynamic_stack_slots: self.dynamic_stack_slots.clone(),
+        }
+    }
+
+    pub(super) fn temporary(&self) -> TempSlot {
         self.temporary
     }
 
-    pub(super) fn adjustment(self) -> StackAdjustment {
+    pub(super) fn adjustment(&self) -> StackAdjustment {
         self.adjustment
     }
 }

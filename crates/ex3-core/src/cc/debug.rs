@@ -23,6 +23,76 @@ pub struct Compilation {
 pub struct CompilerDebugInfo {
     pub functions: Vec<FunctionDebugSymbols>,
     pub frames: Vec<FunctionFrameDebugInfo>,
+    pub assembly_lines: Vec<AssemblyLineDebugInfo>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GeneratedAssembly {
+    pub text: String,
+    pub debug_lines: Vec<AssemblyLineDebugInfo>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AssemblyLineDebugInfo {
+    pub assembly_line: u32,
+    pub function_id: FunctionDebugId,
+    /// Signed word delta satisfying
+    /// `canonical_frame_sp = current_sp + frame_base_delta` immediately before
+    /// this instruction executes (with EX3's 16-bit address wrapping).
+    pub frame_base_delta: i32,
+    pub active_temporaries: Vec<ActiveTemporaryDebugInfo>,
+    pub dynamic_stack_slots: Vec<DynamicStackSlotDebugInfo>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EmitDebugContext {
+    pub function_id: FunctionDebugId,
+    /// See [`AssemblyLineDebugInfo::frame_base_delta`].
+    pub frame_base_delta: i32,
+    pub active_temporaries: Vec<ActiveTemporaryDebugInfo>,
+    pub dynamic_stack_slots: Vec<DynamicStackSlotDebugInfo>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActiveTemporaryDebugInfo {
+    pub slot: u16,
+    pub role: TemporaryRole,
+    pub display_name: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TemporaryRole {
+    UnaryOperand,
+    BinaryLeft,
+    BinaryRight,
+    ComparisonLeft,
+    ComparisonRight,
+    SwitchValue,
+    Other,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DynamicStackSlotDebugInfo {
+    /// Signed word offset from the canonical frame SP. Dynamically pushed
+    /// arguments occupy negative offsets.
+    pub frame_offset: i32,
+    pub kind: DynamicStackSlotKind,
+    pub display_name: String,
+    pub ty: Option<ScalarType>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DynamicStackSlotKind {
+    OutgoingArgument {
+        callee: String,
+        argument_index: u16,
+        parameter_name: Option<String>,
+    },
+    RuntimeArgument {
+        helper: String,
+        argument_index: u16,
+    },
+    Other,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
