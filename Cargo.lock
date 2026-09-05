@@ -3,5 +3,12 @@
 version = 4
 
 [[package]]
-name = "ex3"
+name = "ex3-cli"
+version = "0.1.0"
+dependencies = [
+ "ex3-core",
+]
+
+[[package]]
+name = "ex3-core"
 version = "0.1.0"

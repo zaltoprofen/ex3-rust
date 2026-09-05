@@ -1,4 +1,4 @@
-use ex3::{
+use ex3_core::{
     assembler::Assembler,
     emulator::{ArrayMemory, Cpu, Memory, NullIoBus},
     output::{format_mem, format_probe},
@@ -6,12 +6,19 @@ use ex3::{
 use std::process::Command;
 use std::{
     fs,
+    path::Path,
     time::{SystemTime, UNIX_EPOCH},
 };
 
+fn repository_file(path: &str) -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(path)
+}
+
 #[test]
 fn sample_golden_image_and_execution() {
-    let source = include_str!("../examples/sample.asm");
+    let source = include_str!("../../../examples/sample.asm");
     let assembled = Assembler::new().assemble(source).unwrap();
     assert_eq!(
         format_mem(&assembled.image),
@@ -30,7 +37,9 @@ fn sample_golden_image_and_execution() {
 #[test]
 fn cli_runs_v3_program() {
     let output = Command::new(env!("CARGO_BIN_EXE_ex3"))
-        .args(["run", "examples/halt.asm", "--max-steps", "20"])
+        .arg("run")
+        .arg(repository_file("examples/halt.asm"))
+        .args(["--max-steps", "20"])
         .output()
         .unwrap();
     assert!(
@@ -83,7 +92,7 @@ fn run_displays_serial_output() {
 #[test]
 fn stack_call_example_uses_the_v3_abi() {
     let assembled = Assembler::new()
-        .assemble(include_str!("../examples/stack_call.asm"))
+        .assemble(include_str!("../../../examples/stack_call.asm"))
         .unwrap();
     let result_address = assembled.symbols["RESULT"];
     let mut cpu = Cpu::default();

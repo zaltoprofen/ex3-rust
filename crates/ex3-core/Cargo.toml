@@ -1,0 +1,10 @@
+[package]
+name = "ex3-core"
+version.workspace = true
+edition.workspace = true
+description = "Platform-independent EX3 v3.0 compiler, assembler, emulator, and debugger"
+license.workspace = true
+
+[lib]
+name = "ex3_core"
+path = "src/lib.rs"
