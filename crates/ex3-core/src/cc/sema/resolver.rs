@@ -108,6 +108,7 @@ pub(super) fn resolve(
         functions: resolved_functions,
         debug_info: CompilerDebugInfo {
             functions: debug_functions,
+            frames: Vec::new(),
         },
     })
 }

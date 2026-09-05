@@ -9,8 +9,9 @@ mod sema;
 
 pub use ast::ScalarType;
 pub use debug::{
-    Compilation, CompilerDebugInfo, FunctionDebugId, FunctionDebugSymbols, LocalDebugSymbol,
-    ParameterDebugSymbol,
+    Compilation, CompilerDebugInfo, FunctionDebugId, FunctionDebugSymbols, FunctionFrameDebugInfo,
+    LocalDebugSymbol, LocalSlotDebugInfo, ParameterDebugSymbol, ParameterSlotDebugInfo,
+    ReturnAddressSlotDebugInfo,
 };
 pub use diagnostic::{CcError, CcErrors, Span};
 
@@ -28,9 +29,12 @@ pub fn compile_with_debug_info(source: &str) -> Result<Compilation, CcErrors> {
     let program = sema::analyze(ast).map_err(CcErrors)?;
     let plan = codegen::plan(&program).map_err(CcErrors)?;
     let assembly = codegen::generate(&program, &plan);
+    let frames = plan.into_debug_frames();
+    let mut debug_info = program.debug_info;
+    debug_info.frames = frames;
     Ok(Compilation {
         assembly,
-        debug_info: program.debug_info,
+        debug_info,
     })
 }
 
@@ -167,6 +171,51 @@ mod tests {
                 .image;
             assert_eq!(plain_image, debug_image, "source: {source}");
         }
+    }
+
+    #[test]
+    fn debug_frame_layout_uses_codegen_slot_offsets() {
+        let compilation = compile_with_debug_info(
+            r#"
+                int calculate(int lhs, unsigned int rhs) {
+                    int value;
+                    value = lhs + rhs;
+                    return value;
+                }
+                int main(void) { return calculate(3, 4u); }
+            "#,
+        )
+        .unwrap();
+        let frame = compilation
+            .debug_info
+            .frames
+            .iter()
+            .find(|frame| frame.name == "calculate")
+            .unwrap();
+
+        assert_eq!(frame.function_id.index(), 0);
+        assert_eq!(frame.frame_size, 3);
+        assert_eq!(frame.temporary_count, 2);
+        assert_eq!(frame.return_address.frame_offset, 3);
+        assert_eq!(frame.locals[0].slot, 0);
+        assert_eq!(frame.locals[0].frame_offset, 0);
+        assert_eq!(frame.parameters[0].index, 0);
+        assert_eq!(frame.parameters[0].frame_offset, 4);
+        assert_eq!(frame.parameters[1].index, 1);
+        assert_eq!(frame.parameters[1].frame_offset, 5);
+    }
+
+    #[test]
+    fn empty_function_frame_still_describes_the_return_address() {
+        let compilation = compile_with_debug_info("int main(void) { return 42; }").unwrap();
+        let frame = &compilation.debug_info.frames[0];
+
+        assert_eq!(frame.name, "main");
+        assert_eq!(frame.frame_size, 0);
+        assert_eq!(frame.temporary_count, 0);
+        assert!(frame.parameters.is_empty());
+        assert!(frame.locals.is_empty());
+        assert_eq!(frame.return_address.frame_offset, 0);
     }
 
     #[test]

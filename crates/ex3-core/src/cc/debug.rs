@@ -22,6 +22,7 @@ pub struct Compilation {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CompilerDebugInfo {
     pub functions: Vec<FunctionDebugSymbols>,
+    pub frames: Vec<FunctionFrameDebugInfo>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,4 +45,36 @@ pub struct LocalDebugSymbol {
     pub slot: usize,
     pub name: String,
     pub ty: ScalarType,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FunctionFrameDebugInfo {
+    pub function_id: FunctionDebugId,
+    pub name: String,
+    pub frame_size: u16,
+    pub parameters: Vec<ParameterSlotDebugInfo>,
+    pub return_address: ReturnAddressSlotDebugInfo,
+    pub locals: Vec<LocalSlotDebugInfo>,
+    pub temporary_count: u16,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParameterSlotDebugInfo {
+    pub index: u16,
+    pub name: String,
+    pub ty: ScalarType,
+    pub frame_offset: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReturnAddressSlotDebugInfo {
+    pub frame_offset: i32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalSlotDebugInfo {
+    pub slot: u16,
+    pub name: String,
+    pub ty: ScalarType,
+    pub frame_offset: i32,
 }
