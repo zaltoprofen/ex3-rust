@@ -84,10 +84,16 @@ pub struct MemoryCell {
 pub struct MemoryImage {
     pub cells: Vec<MemoryCell>,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AssemblySourceMapEntry {
+    pub address: Address,
+    pub span: Span,
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AssemblyResult {
     pub image: MemoryImage,
     pub symbols: BTreeMap<String, Address>,
+    pub source_map: Vec<AssemblySourceMapEntry>,
 }
 
 #[derive(Clone, Debug)]
@@ -163,6 +169,7 @@ impl Assembler {
         }
         let lookup: HashMap<_, _> = symbols.iter().map(|(k, v)| (k.as_str(), *v)).collect();
         let mut image = MemoryImage::default();
+        let mut source_map = Vec::new();
         let mut used = HashSet::new();
         lc = 0;
         for line in &lines {
@@ -191,6 +198,13 @@ impl Assembler {
                             word,
                             kind,
                         });
+                        source_map.push(AssemblySourceMapEntry {
+                            address,
+                            span: Span {
+                                line: line.line,
+                                column: 1,
+                            },
+                        });
                         lc += 1;
                     }
                 }
@@ -201,7 +215,11 @@ impl Assembler {
             }
         }
         if errors.is_empty() {
-            Ok(AssemblyResult { image, symbols })
+            Ok(AssemblyResult {
+                image,
+                symbols,
+                source_map,
+            })
         } else {
             Err(AsmErrors(errors))
         }
@@ -581,5 +599,73 @@ mod tests {
             .0
             .iter()
             .any(|x| matches!(x.kind, AsmErrorKind::DuplicateLabel(_))));
+    }
+
+    #[test]
+    fn source_map_tracks_normal_instructions_and_uses_one_based_lines() {
+        let result = Assembler::new()
+            .assemble("; comment\nORG 0x0010\nLDA 1\nADD 2\nHLT\nEND\n")
+            .unwrap();
+
+        assert_eq!(
+            result.source_map,
+            vec![
+                AssemblySourceMapEntry {
+                    address: Address::new(0x0010).unwrap(),
+                    span: Span { line: 3, column: 1 },
+                },
+                AssemblySourceMapEntry {
+                    address: Address::new(0x0011).unwrap(),
+                    span: Span { line: 4, column: 1 },
+                },
+                AssemblySourceMapEntry {
+                    address: Address::new(0x0012).unwrap(),
+                    span: Span { line: 5, column: 1 },
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn source_map_omits_label_only_lines_and_tracks_data() {
+        let result = Assembler::new()
+            .assemble("ORG 0x0020\nLABEL:\nHEX deadbeef\nVALUE: DEC 42\nEND\n")
+            .unwrap();
+
+        assert_eq!(result.source_map.len(), 2);
+        assert_eq!(result.source_map[0].address.get(), 0x0020);
+        assert_eq!(result.source_map[0].span.line, 3);
+        assert_eq!(result.source_map[1].address.get(), 0x0021);
+        assert_eq!(result.source_map[1].span.line, 4);
+    }
+
+    #[test]
+    fn source_map_maps_all_pseudo_instruction_words_to_the_same_line() {
+        let result = Assembler::new()
+            .assemble("ORG 0x0100\nPUSH\nPOP\nEND\n")
+            .unwrap();
+
+        let mappings: Vec<_> = result
+            .source_map
+            .iter()
+            .map(|entry| (entry.address.get(), entry.span.line))
+            .collect();
+        assert_eq!(
+            mappings,
+            vec![(0x0100, 2), (0x0101, 2), (0x0102, 3), (0x0103, 3)]
+        );
+    }
+
+    #[test]
+    fn source_map_tracks_discontiguous_org_regions() {
+        let result = Assembler::new()
+            .assemble("ORG 0x0010\nHLT\nORG 0x0200\nVALUE: HEX 1\nEND\n")
+            .unwrap();
+
+        assert_eq!(result.source_map.len(), 2);
+        assert_eq!(result.source_map[0].address.get(), 0x0010);
+        assert_eq!(result.source_map[0].span.line, 2);
+        assert_eq!(result.source_map[1].address.get(), 0x0200);
+        assert_eq!(result.source_map[1].span.line, 4);
     }
 }

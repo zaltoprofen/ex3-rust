@@ -1,17 +1,16 @@
-[package]
-name = "ex3"
+[workspace]
+resolver = "2"
+members = [
+    "crates/ex3-core",
+    "crates/ex3-cli",
+    "crates/ex3-wasm",
+]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
-description = "Assembler, emulator and debugger for the EX3 v3.0 ISA"
 license = "MIT"
-
-[lib]
-name = "ex3"
-path = "src/lib.rs"
-
-[[bin]]
-name = "ex3"
-path = "src/main.rs"
+repository = "https://github.com/zaltoprofen/ex3-rust"
 
 [profile.release]
 lto = true

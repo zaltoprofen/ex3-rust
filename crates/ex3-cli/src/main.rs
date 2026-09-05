@@ -1,4 +1,4 @@
-use ex3::{
+use ex3_core::{
     assembler::{Assembler, CellKind},
     debugger::{format_current, format_registers, Debugger, RunStop},
     emulator::{
@@ -157,7 +157,7 @@ fn io_bus(args: &[String]) -> Result<RuntimeIoBus, Box<dyn Error>> {
         }
     }
 }
-fn assemble_source(path: &str) -> Result<ex3::assembler::AssemblyResult, Box<dyn Error>> {
+fn assemble_source(path: &str) -> Result<ex3_core::assembler::AssemblyResult, Box<dyn Error>> {
     let source = fs::read_to_string(path)?;
     Ok(Assembler::new().assemble(&source)?)
 }
@@ -185,7 +185,7 @@ fn assemble_cmd(args: &[String]) -> Result<(), Box<dyn Error>> {
 fn cc_cmd(args: &[String]) -> Result<(), Box<dyn Error>> {
     let input = input_arg(args)?;
     let source = fs::read_to_string(input)?;
-    let assembly = ex3::cc::compile(&source)?;
+    let assembly = ex3_core::cc::compile(&source)?;
     let base = Path::new(input);
     if flag(args, "-S") || flag(args, "--assembly") {
         let output = option(args, "-o")
