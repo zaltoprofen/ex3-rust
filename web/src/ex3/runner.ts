@@ -150,10 +150,12 @@ export function refreshMachine(
   state: MachineUiState & { snapshot: CpuSnapshot },
 ): MachineUiState {
   const { snapshot } = state;
+  const stackView = refreshStackView(session);
   return {
     ...state,
     disassembly: session.disassembly_range((snapshot.pc - 4) & 0xffff, DISASSEMBLY_WORDS),
     stackMemory: session.memory_range((snapshot.sp - 8) & 0xffff, STACK_WORDS),
+    ...stackView,
     selectedMemory: session.memory_range(
       state.selectedMemoryAddress,
       SELECTED_MEMORY_WORDS,
@@ -161,6 +163,19 @@ export function refreshMachine(
     serialOutput: session.serial_output(),
     breakpoints: session.breakpoints(),
   };
+}
+
+function refreshStackView(
+  session: Ex3SessionApi,
+): Pick<MachineUiState, "stackView" | "stackViewError"> {
+  try {
+    return { stackView: session.stack_view(), stackViewError: null };
+  } catch (thrown) {
+    return {
+      stackView: null,
+      stackViewError: normalizeError(thrown).message,
+    };
+  }
 }
 
 function normalizeError(thrown: unknown): Ex3Error {

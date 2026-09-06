@@ -5,7 +5,9 @@ let sessionPromise: Promise<Ex3SessionApi> | null = null;
 
 export function getEx3Session(): Promise<Ex3SessionApi> {
   if (sessionPromise === null) {
-    sessionPromise = init().then(() => new Ex3Session());
+    // The generated declaration is refreshed by `npm run wasm:build`; keep this
+    // boundary typed against the application API for source-only typechecks.
+    sessionPromise = init().then(() => new Ex3Session() as unknown as Ex3SessionApi);
   }
   return sessionPromise;
 }

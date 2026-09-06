@@ -116,10 +116,20 @@ button:disabled {
 
 .editor-grid,
 .machine-grid,
-.debug-grid {
+.debug-grid,
+.stack-memory-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 1rem;
+}
+
+.disassembly-row {
+  display: grid;
+}
+
+.stack-memory-grid {
+  grid-template-columns: minmax(24rem, 0.9fr) minmax(0, 1.4fr);
+  align-items: start;
 }
 
 .editor-grid {
@@ -162,6 +172,210 @@ button:disabled {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 1rem;
+}
+
+.stack-view {
+  min-width: 0;
+}
+
+.stack-context {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem 1rem;
+  padding: 0.7rem 0.9rem;
+  color: #a9bad0;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 0.76rem;
+}
+
+.stack-warning,
+.stack-unavailable,
+.stack-empty {
+  margin: 0.55rem 0.9rem;
+  padding: 0.6rem 0.7rem;
+  border-radius: 0.4rem;
+  font-size: 0.78rem;
+}
+
+.stack-warning {
+  border: 1px solid #6d5d2b;
+  color: #ffe7a2;
+  background: rgba(98, 78, 20, 0.34);
+}
+
+.stack-unavailable,
+.stack-empty {
+  color: #91a4ba;
+  background: #0b111a;
+}
+
+.call-stack,
+.stack-frame,
+.raw-stack-fallback {
+  padding: 0 0.9rem 0.9rem;
+}
+
+.call-stack h3,
+.stack-frame h3,
+.raw-stack-fallback h3,
+.slot-section h4 {
+  margin: 0;
+  color: #c6d6e8;
+  font-size: 0.82rem;
+}
+
+.call-stack ol {
+  display: grid;
+  gap: 0.3rem;
+  margin: 0.55rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.call-stack button {
+  display: grid;
+  grid-template-columns: 1.2rem minmax(0, 1fr) auto;
+  align-items: center;
+  width: 100%;
+  border-color: #34445a;
+  padding: 0.48rem 0.6rem;
+  color: #c8d8e9;
+  background: #0b111a;
+  text-align: left;
+}
+
+.call-stack button small {
+  color: #8098b3;
+  font-size: 0.68rem;
+}
+
+.call-stack .selected-frame {
+  border-color: #4d8fd8;
+  color: #f4f9ff;
+  background: rgba(42, 116, 181, 0.3);
+}
+
+.frame-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.7rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid #27364a;
+}
+
+.current-badge,
+.suspended-badge {
+  display: inline-block;
+  margin-top: 0.3rem;
+  border-radius: 999px;
+  padding: 0.2rem 0.45rem;
+  font-size: 0.66rem;
+  font-weight: 800;
+}
+
+.current-badge {
+  color: #b9ffe9;
+  background: #164f40;
+}
+
+.suspended-badge {
+  color: #c6d6e8;
+  background: #2a384a;
+}
+
+.secondary-button {
+  padding: 0.38rem 0.55rem;
+  border-color: #3b5069;
+  color: #c6d6e8;
+  background: #182333;
+  font-size: 0.72rem;
+}
+
+.frame-registers {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.45rem 0.8rem;
+  margin: 0.75rem 0;
+}
+
+.frame-registers div {
+  min-width: 0;
+}
+
+.frame-registers dt {
+  color: #7791ad;
+  font-size: 0.68rem;
+  font-weight: 800;
+}
+
+.frame-registers dd {
+  margin: 0.12rem 0 0;
+  overflow: hidden;
+  color: #d7e9ff;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 0.75rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.slot-section {
+  margin-top: 0.85rem;
+}
+
+.slot-section h4 {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.6rem;
+  margin-bottom: 0.35rem;
+}
+
+.call-target {
+  color: #73d9b6;
+  font-size: 0.7rem;
+  font-weight: 500;
+}
+
+.slot-table-scroll {
+  overflow-x: auto;
+  border: 1px solid #27364a;
+  border-radius: 0.35rem;
+}
+
+.slot-table-scroll table {
+  min-width: 43rem;
+}
+
+.address-link {
+  border: 0;
+  padding: 0;
+  color: #82c6ff;
+  background: transparent;
+  font-family: inherit;
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 0.15rem;
+}
+
+.address-link:hover:not(:disabled) {
+  color: #b9e0ff;
+  background: transparent;
+}
+
+.slot-description {
+  display: block;
+  max-width: 18rem;
+  overflow: hidden;
+  color: #91a4ba;
+  text-overflow: ellipsis;
+}
+
+.active-slot {
+  background: rgba(25, 138, 105, 0.22);
+}
+
+.inactive-slot {
+  color: #91a4ba;
 }
 
 .panel-heading-row {
@@ -461,6 +675,7 @@ th {
   .editor-grid,
   .machine-grid,
   .debug-grid,
+  .stack-memory-grid,
   .memory-group {
     grid-template-columns: 1fr;
   }

@@ -14,6 +14,7 @@ import type {
   DisassemblyRow,
   Ex3SessionApi,
   MemoryRow,
+  StackViewSnapshot,
 } from "./types";
 
 const snapshot = (overrides: Partial<CpuSnapshot> = {}): CpuSnapshot => ({
@@ -53,6 +54,18 @@ const disassemblyRows = (start: number, count: number): DisassemblyRow[] =>
     labels: [],
   }));
 
+const stackView = (overrides: Partial<StackViewSnapshot> = {}): StackViewSnapshot => ({
+  available: false,
+  context: "startup",
+  contextSymbol: null,
+  pc: 0x10,
+  sp: 0,
+  frames: [],
+  rawStack: memoryRows(0, 8),
+  warnings: [],
+  ...overrides,
+});
+
 function fakeSession(overrides: Partial<Ex3SessionApi> = {}): Ex3SessionApi {
   return {
     compile_and_load: vi.fn(() => ({
@@ -75,6 +88,7 @@ function fakeSession(overrides: Partial<Ex3SessionApi> = {}): Ex3SessionApi {
       breakpointAddress: null,
       snapshot: snapshot({ pc: 0x20, executedInstructions: 2_000 }),
     })),
+    stack_view: vi.fn(() => stackView()),
     memory_range: vi.fn(memoryRows),
     disassembly_range: vi.fn(disassemblyRows),
     toggle_breakpoint: vi.fn(() => true),
@@ -98,7 +112,37 @@ describe("machine runner", () => {
     expect(next.snapshot?.pc).toBe(0x10);
     expect(next.disassembly).toHaveLength(16);
     expect(next.stackMemory).toHaveLength(24);
+    expect(next.stackView?.context).toBe("startup");
     expect(next.phase).toBe("ready");
+  });
+
+  it("refreshes the stack view once after compile, reset, step, and each run chunk", () => {
+    const session = fakeSession();
+    let state = compileMachine(session, createInitialMachineState());
+    state = resetMachine(session, state);
+    state = stepMachine(session, state);
+    state = runMachineChunk(session, state, 2_000).state;
+
+    expect(session.stack_view).toHaveBeenCalledTimes(4);
+    expect(state.stackViewError).toBeNull();
+  });
+
+  it("keeps stack view failures separate from CPU execution errors", () => {
+    const session = fakeSession({
+      stack_view: vi.fn(() => {
+        throw new Error("stack metadata unavailable");
+      }),
+    });
+
+    const next = stepMachine(session, {
+      ...createInitialMachineState(),
+      phase: "ready",
+    });
+
+    expect(next.phase).toBe("ready");
+    expect(next.errorMessage).toBeNull();
+    expect(next.stackView).toBeNull();
+    expect(next.stackViewError).toBe("stack metadata unavailable");
   });
 
   it("uses the WASM step snapshot as the next machine state", () => {

@@ -613,4 +613,46 @@ mod tests {
         assert_eq!(unsigned.signed_value, None);
         assert_eq!(unsigned.unsigned_value, Some(u32::MAX));
     }
+
+    #[test]
+    fn stack_view_dto_exposes_logical_outgoing_argument_identity() {
+        let mut session = SessionCore::new();
+        session
+            .compile_and_load(
+                r#"
+                    int add(int left, int right) { return left + right; }
+                    int main(void) { return add(10, 20); }
+                "#,
+            )
+            .unwrap();
+        let outgoing = (0..100)
+            .find_map(|_| {
+                let slots = session
+                    .stack_view()
+                    .unwrap()
+                    .frames
+                    .into_iter()
+                    .flat_map(|frame| frame.slots)
+                    .filter(|slot| slot.kind == StackSlotKindDto::OutgoingArgument)
+                    .collect::<Vec<_>>();
+                if slots.len() == 2 {
+                    Some(slots)
+                } else {
+                    session.step().unwrap();
+                    None
+                }
+            })
+            .expect("outgoing arguments were not observed");
+
+        assert_eq!(
+            outgoing
+                .iter()
+                .map(|slot| slot.argument_index)
+                .collect::<Vec<_>>(),
+            [Some(1), Some(0)]
+        );
+        assert!(outgoing
+            .iter()
+            .all(|slot| slot.call_target.as_deref() == Some("add")));
+    }
 }

@@ -156,6 +156,8 @@ pub struct StackSlotDto {
     pub unsigned_value: Option<u32>,
     pub active: Option<bool>,
     pub description: Option<String>,
+    pub argument_index: Option<u16>,
+    pub call_target: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -232,26 +234,43 @@ impl From<ex3_core::stack_view::StackFrame> for StackFrameDto {
 
 impl From<StackSlot> for StackSlotDto {
     fn from(slot: StackSlot) -> Self {
-        let (kind, active, description) = match &slot.kind {
-            StackSlotKind::Parameter { .. } => (StackSlotKindDto::Parameter, None, None),
-            StackSlotKind::ReturnAddress => (StackSlotKindDto::ReturnAddress, None, None),
-            StackSlotKind::Local { .. } => (StackSlotKindDto::Local, None, None),
+        let (kind, active, description, argument_index, call_target) = match &slot.kind {
+            StackSlotKind::Parameter { .. } => {
+                (StackSlotKindDto::Parameter, None, None, None, None)
+            }
+            StackSlotKind::ReturnAddress => {
+                (StackSlotKindDto::ReturnAddress, None, None, None, None)
+            }
+            StackSlotKind::Local { .. } => (StackSlotKindDto::Local, None, None, None, None),
             StackSlotKind::Temporary { active, .. } => (
                 StackSlotKindDto::Temporary,
                 Some(*active),
                 Some(slot.display_name.clone()),
+                None,
+                None,
             ),
-            StackSlotKind::OutgoingArgument { .. } => (
+            StackSlotKind::OutgoingArgument {
+                callee,
+                argument_index,
+                ..
+            } => (
                 StackSlotKindDto::OutgoingArgument,
                 None,
                 Some(slot.display_name.clone()),
+                Some(*argument_index),
+                Some(callee.clone()),
             ),
-            StackSlotKind::RuntimeArgument { .. } => (
+            StackSlotKind::RuntimeArgument {
+                helper,
+                argument_index,
+            } => (
                 StackSlotKindDto::RuntimeArgument,
                 None,
                 Some(slot.display_name.clone()),
+                Some(*argument_index),
+                Some(helper.clone()),
             ),
-            StackSlotKind::Unknown => (StackSlotKindDto::Unknown, None, None),
+            StackSlotKind::Unknown => (StackSlotKindDto::Unknown, None, None, None, None),
         };
         let (signed_value, unsigned_value) = match slot.typed_value {
             Some(TypedStackValue::Signed(value)) => (Some(value), None),
@@ -273,6 +292,8 @@ impl From<StackSlot> for StackSlotDto {
             unsigned_value: typed_value_is_valid.then_some(unsigned_value).flatten(),
             active,
             description,
+            argument_index,
+            call_target,
         }
     }
 }
