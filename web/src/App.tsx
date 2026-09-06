@@ -263,21 +263,21 @@ export default function App() {
         <FlagsView snapshot={machine.snapshot} />
       </div>
 
-      <div className="disassembly-row">
-        <DisassemblyView
-          rows={machine.disassembly}
-          pc={machine.snapshot?.pc ?? null}
-          breakpoints={machine.breakpoints}
-        />
-      </div>
-
-      <div className="stack-memory-grid">
+      <div className="stack-view-row">
         <StackView
           snapshot={machine.stackView}
           error={machine.stackViewError}
           loading={machine.busy}
           memorySelectionDisabled={controlsDisabled || machine.snapshot === null}
           onSelectAddress={setMemoryAddress}
+        />
+      </div>
+
+      <div className="disassembly-memory-grid">
+        <DisassemblyView
+          rows={machine.disassembly}
+          pc={machine.snapshot?.pc ?? null}
+          breakpoints={machine.breakpoints}
         />
         <MemoryView
           stackRows={machine.stackMemory}
