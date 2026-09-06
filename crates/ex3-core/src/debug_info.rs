@@ -265,21 +265,13 @@ pub fn link_program_debug_info(
         let Some(state) = states_by_line.get(&line).copied() else {
             continue;
         };
-        let post_statement_state = states_by_line
-            .range((std::ops::Bound::Excluded(line), std::ops::Bound::Unbounded))
-            .map(|(_, candidate)| *candidate)
-            .find(|candidate| candidate.function_id == state.function_id);
         let mut frame_base_delta = state.frame_base_delta;
-        let mut active_temporaries = state.active_temporaries.clone();
-        let mut dynamic_stack_slots = state.dynamic_stack_slots.clone();
+        let active_temporaries = state.active_temporaries.clone();
+        let dynamic_stack_slots = state.dynamic_stack_slots.clone();
         if is_push_store(source.expansion_index, source.instruction) {
             frame_base_delta = frame_base_delta
                 .checked_add(1)
                 .expect("compiler stack adjustment exceeds i32");
-            if let Some(post) = post_statement_state {
-                active_temporaries = post.active_temporaries.clone();
-                dynamic_stack_slots = post.dynamic_stack_slots.clone();
-            }
         }
         linked_lines.insert(line);
         instructions.insert(
@@ -539,8 +531,28 @@ mod tests {
             before_store.frame_base_delta,
             before_adjust.frame_base_delta + 1
         );
+        // `ADJSP -1` has executed, but `STSP 0` has not. The stack word is
+        // allocated at this point, but it does not contain the outgoing
+        // argument value yet, so the dynamic slot must not be exposed.
         assert_eq!(
-            before_store.dynamic_stack_slots.len(),
+            before_store.dynamic_stack_slots,
+            before_adjust.dynamic_stack_slots
+        );
+        assert_eq!(
+            before_store.active_temporaries,
+            before_adjust.active_temporaries
+        );
+
+        let call_line = assembly_line(&compilation.assembly, "CALL identity");
+        let call_address = assembled
+            .source_map
+            .iter()
+            .find(|entry| entry.span.line == call_line as usize)
+            .unwrap()
+            .address;
+        let before_call = linked.instruction(call_address).unwrap();
+        assert_eq!(
+            before_call.dynamic_stack_slots.len(),
             before_adjust.dynamic_stack_slots.len() + 1
         );
     }

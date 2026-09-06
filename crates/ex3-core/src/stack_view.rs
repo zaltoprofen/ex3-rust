@@ -795,9 +795,15 @@ mod tests {
                 )
             })
             .count();
+        let pushed_value = cpu.state().ac;
+        let pushed_address = cpu.state().sp.wrapping_add_signed(-1);
+        let poison = pushed_value ^ u32::MAX;
+        memory.write(pushed_address, poison);
 
         cpu.step(&mut memory, &mut io).unwrap();
         assert_eq!(cpu.state().pc, push_addresses[1]);
+        assert_eq!(cpu.state().sp, pushed_address);
+        assert_eq!(memory.read(pushed_address), poison);
         let before_store = build_stack_view(
             Some(&program),
             &memory,
@@ -826,10 +832,18 @@ mod tests {
                     )
                 })
                 .count(),
-            dynamic_count + 1
+            dynamic_count
         );
+        assert!(!before_store.frames[0].slots.iter().any(|slot| {
+            slot.address == pushed_address
+                && matches!(
+                    slot.kind,
+                    StackSlotKind::OutgoingArgument { .. } | StackSlotKind::RuntimeArgument { .. }
+                )
+        }));
 
         cpu.step(&mut memory, &mut io).unwrap();
+        assert_eq!(memory.read(pushed_address), pushed_value);
         let after = build_stack_view(
             Some(&program),
             &memory,
@@ -855,6 +869,24 @@ mod tests {
                 })
                 .count(),
             dynamic_count + 1
+        );
+        let stored_argument = after.frames[0]
+            .slots
+            .iter()
+            .find(|slot| {
+                slot.address == pushed_address
+                    && matches!(
+                        slot.kind,
+                        StackSlotKind::OutgoingArgument { .. }
+                            | StackSlotKind::RuntimeArgument { .. }
+                    )
+            })
+            .expect("stored argument should become visible after STSP 0 executes");
+        assert_eq!(stored_argument.raw, pushed_value);
+        assert_eq!(stored_argument.value_status, StackValueStatus::Value);
+        assert_eq!(
+            stored_argument.typed_value,
+            Some(TypedStackValue::Signed(pushed_value as i32))
         );
     }
 
