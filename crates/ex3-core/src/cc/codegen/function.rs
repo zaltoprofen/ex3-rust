@@ -6,7 +6,7 @@ use super::{
 use crate::cc::{
     ast::{BinOp, UnOp},
     sema::{ResolvedCallee, ResolvedExpr, ResolvedExprKind, ResolvedFunction, ResolvedVariable},
-    EmitDebugContext, FunctionDebugSymbols, GeneratedAssembly,
+    EmitDebugContext, FixedFrameState, FunctionDebugSymbols, GeneratedAssembly,
 };
 
 pub(super) struct GeneratedFunction {
@@ -41,6 +41,11 @@ impl<'a> FunctionGenerator<'a> {
         emitter.set_debug_context(EmitDebugContext {
             function_id: debug_symbols.id,
             frame_base_delta: -i32::try_from(frame.size()).expect("frame size exceeds i32"),
+            fixed_frame_state: if frame.size() == 0 {
+                FixedFrameState::Allocated
+            } else {
+                FixedFrameState::NotAllocated
+            },
             active_temporaries: Vec::new(),
             dynamic_stack_slots: Vec::new(),
         });
@@ -68,6 +73,11 @@ impl<'a> FunctionGenerator<'a> {
         self.emitter.set_debug_context(EmitDebugContext {
             function_id: self.debug_symbols.id,
             frame_base_delta: -i32::try_from(self.frame.size()).expect("frame size exceeds i32"),
+            fixed_frame_state: if self.frame.size() == 0 {
+                FixedFrameState::Allocated
+            } else {
+                FixedFrameState::Released
+            },
             active_temporaries: Vec::new(),
             dynamic_stack_slots: Vec::new(),
         });

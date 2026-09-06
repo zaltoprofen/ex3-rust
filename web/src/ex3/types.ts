@@ -81,6 +81,15 @@ export type StackSlotKind =
   | "runtime-argument"
   | "unknown";
 
+export type StackSlotState =
+  | "value"
+  | "current-storage"
+  | "inactive-scratch"
+  | "not-allocated"
+  | "released"
+  | "control"
+  | "unknown";
+
 export interface StackSlotDto {
   address: number;
   frameOffset: number;
@@ -91,6 +100,7 @@ export interface StackSlotDto {
   signedValue: number | null;
   unsignedValue: number | null;
   active: boolean | null;
+  state: StackSlotState;
   description: string | null;
   argumentIndex: number | null;
   callTarget: string | null;

@@ -5,8 +5,9 @@ use crate::cc::{
         ResolvedSwitchPart,
     },
     ActiveTemporaryDebugInfo, DynamicStackSlotDebugInfo, DynamicStackSlotKind, EmitDebugContext,
-    FunctionDebugId, FunctionDebugSymbols, FunctionFrameDebugInfo, LocalSlotDebugInfo,
-    ParameterSlotDebugInfo, ReturnAddressSlotDebugInfo, ScalarType, TemporaryRole,
+    FixedFrameState, FunctionDebugId, FunctionDebugSymbols, FunctionFrameDebugInfo,
+    LocalSlotDebugInfo, ParameterSlotDebugInfo, ReturnAddressSlotDebugInfo, ScalarType,
+    TemporaryRole,
 };
 use std::fmt;
 
@@ -374,6 +375,7 @@ impl EvalContext {
             // words above the current SP until the dynamic slots are cleaned up.
             frame_base_delta: i32::try_from(self.adjustment.0)
                 .expect("stack adjustment exceeds i32"),
+            fixed_frame_state: FixedFrameState::Allocated,
             active_temporaries: self.active_temporaries.clone(),
             dynamic_stack_slots: self.dynamic_stack_slots.clone(),
         }

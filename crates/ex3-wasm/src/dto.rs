@@ -155,6 +155,7 @@ pub struct StackSlotDto {
     pub signed_value: Option<i32>,
     pub unsigned_value: Option<u32>,
     pub active: Option<bool>,
+    pub state: StackSlotStateDto,
     pub description: Option<String>,
     pub argument_index: Option<u16>,
     pub call_target: Option<String>,
@@ -169,6 +170,18 @@ pub enum StackSlotKindDto {
     Temporary,
     OutgoingArgument,
     RuntimeArgument,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StackSlotStateDto {
+    Value,
+    CurrentStorage,
+    InactiveScratch,
+    NotAllocated,
+    Released,
+    Control,
     Unknown,
 }
 
@@ -277,9 +290,18 @@ impl From<StackSlot> for StackSlotDto {
             Some(TypedStackValue::Unsigned(value)) => (None, Some(value)),
             None => (None, None),
         };
-        let typed_value_is_valid = !matches!(
+        let state = match slot.value_status {
+            StackValueStatus::Value => StackSlotStateDto::Value,
+            StackValueStatus::CurrentStorage => StackSlotStateDto::CurrentStorage,
+            StackValueStatus::StaleScratch => StackSlotStateDto::InactiveScratch,
+            StackValueStatus::NotAllocated => StackSlotStateDto::NotAllocated,
+            StackValueStatus::Released => StackSlotStateDto::Released,
+            StackValueStatus::Control => StackSlotStateDto::Control,
+            StackValueStatus::Unknown => StackSlotStateDto::Unknown,
+        };
+        let typed_value_is_valid = matches!(
             slot.value_status,
-            StackValueStatus::StaleScratch | StackValueStatus::Control | StackValueStatus::Unknown
+            StackValueStatus::Value | StackValueStatus::CurrentStorage
         );
         Self {
             address: slot.address.get(),
@@ -291,6 +313,7 @@ impl From<StackSlot> for StackSlotDto {
             signed_value: typed_value_is_valid.then_some(signed_value).flatten(),
             unsigned_value: typed_value_is_valid.then_some(unsigned_value).flatten(),
             active,
+            state,
             description,
             argument_index,
             call_target,

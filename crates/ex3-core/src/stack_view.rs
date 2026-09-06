@@ -1,7 +1,7 @@
 //! Semantic reconstruction of EX3 C stack frames from sidecar debug metadata.
 
 use crate::{
-    cc::{DynamicStackSlotKind, FunctionDebugId, ScalarType, TemporaryRole},
+    cc::{DynamicStackSlotKind, FixedFrameState, FunctionDebugId, ScalarType, TemporaryRole},
     debug_info::{
         InstructionDebugInfo, LinkedFunctionDebugInfo, LinkedSymbolKind, ProgramDebugInfo,
     },
@@ -150,6 +150,8 @@ pub enum StackValueStatus {
     Value,
     CurrentStorage,
     StaleScratch,
+    NotAllocated,
+    Released,
     Control,
     Unknown,
 }
@@ -370,6 +372,7 @@ fn build_frame(
         return_target: Some(symbolicate_nearest(program, return_address)),
     });
     for local in &function.locals {
+        let value_status = fixed_storage_status(cursor.instruction.fixed_frame_state);
         slots.push(read_slot(
             memory,
             frame_sp,
@@ -377,7 +380,7 @@ fn build_frame(
             StackSlotKind::Local { slot: local.slot },
             local.name.clone(),
             Some(local.ty),
-            StackValueStatus::CurrentStorage,
+            value_status,
             None,
         )?);
     }
@@ -389,6 +392,12 @@ fn build_frame(
         let local_count = i32::try_from(function.locals.len())
             .map_err(|_| StackViewError::SlotCountOutOfRange(function.locals.len()))?;
         let offset = local_count + i32::from(slot);
+        let value_status = match cursor.instruction.fixed_frame_state {
+            FixedFrameState::NotAllocated => StackValueStatus::NotAllocated,
+            FixedFrameState::Released => StackValueStatus::Released,
+            FixedFrameState::Allocated if active.is_some() => StackValueStatus::Value,
+            FixedFrameState::Allocated => StackValueStatus::StaleScratch,
+        };
         slots.push(read_slot(
             memory,
             frame_sp,
@@ -403,11 +412,7 @@ fn build_frame(
                 |temporary| temporary.display_name.clone(),
             ),
             None,
-            if active.is_some() {
-                StackValueStatus::Value
-            } else {
-                StackValueStatus::StaleScratch
-            },
+            value_status,
             None,
         )?);
     }
@@ -462,6 +467,14 @@ fn build_frame(
     ))
 }
 
+fn fixed_storage_status(frame_state: FixedFrameState) -> StackValueStatus {
+    match frame_state {
+        FixedFrameState::NotAllocated => StackValueStatus::NotAllocated,
+        FixedFrameState::Allocated => StackValueStatus::CurrentStorage,
+        FixedFrameState::Released => StackValueStatus::Released,
+    }
+}
+
 fn append_metadata_warnings(
     warnings: &mut Vec<String>,
     function: &LinkedFunctionDebugInfo,
@@ -504,7 +517,14 @@ fn read_slot(
 ) -> Result<StackSlot, StackViewError> {
     let address = add_signed(frame_sp, frame_offset)?;
     let raw = memory.read(address);
-    let typed_value = if value_status == StackValueStatus::StaleScratch {
+    let typed_value = if matches!(
+        value_status,
+        StackValueStatus::StaleScratch
+            | StackValueStatus::NotAllocated
+            | StackValueStatus::Released
+            | StackValueStatus::Control
+            | StackValueStatus::Unknown
+    ) {
         None
     } else {
         ty.map(|ty| typed_value(ty, raw))
@@ -637,6 +657,7 @@ mod tests {
         cc::{self, CompilerDebugInfo},
         debug_info::link_program_debug_info,
         emulator::{ArrayMemory, Cpu, NullIoBus, StepOutcome},
+        isa::{decode, ImmediateOp, Instruction},
     };
     use std::cell::Cell;
 
@@ -672,6 +693,169 @@ mod tests {
             .iter()
             .find(|slot| predicate(&slot.kind))
             .unwrap()
+    }
+
+    fn fixed_slot_addresses(frame: &StackFrame) -> Vec<(StackSlotKind, Address)> {
+        frame
+            .slots
+            .iter()
+            .filter(|slot| {
+                !matches!(
+                    slot.kind,
+                    StackSlotKind::OutgoingArgument { .. }
+                        | StackSlotKind::RuntimeArgument { .. }
+                        | StackSlotKind::Unknown
+                )
+            })
+            .map(|slot| (slot.kind.clone(), slot.address))
+            .collect()
+    }
+
+    fn assert_push_boundaries(
+        source: &str,
+        function_name: &str,
+        call_target: &str,
+        minimum_frame_depth: usize,
+    ) {
+        let compilation = cc::compile_with_debug_info(source).unwrap();
+        let assembled = Assembler::new().assemble(&compilation.assembly).unwrap();
+        let program = link_program_debug_info(&compilation.debug_info, &assembled).unwrap();
+        let function_id = program
+            .functions
+            .iter()
+            .find(|function| function.name == function_name)
+            .unwrap()
+            .id;
+        let call_line = compilation
+            .debug_info
+            .assembly_lines
+            .iter()
+            .find(|state| {
+                state.function_id == function_id
+                    && compilation
+                        .assembly
+                        .lines()
+                        .nth(state.assembly_line as usize - 1)
+                        .is_some_and(|line| line.trim() == format!("CALL {call_target}"))
+            })
+            .unwrap()
+            .assembly_line;
+        let push_line = call_line - 1;
+        assert_eq!(
+            compilation
+                .assembly
+                .lines()
+                .nth(push_line as usize - 1)
+                .unwrap()
+                .trim(),
+            "PUSH"
+        );
+        let push_addresses = assembled
+            .source_map
+            .iter()
+            .filter(|entry| entry.span.line == push_line as usize)
+            .map(|entry| entry.address)
+            .collect::<Vec<_>>();
+        assert_eq!(push_addresses.len(), 2);
+
+        let mut memory = ArrayMemory::from_image(&assembled.image);
+        let mut cpu = Cpu::new();
+        let mut io = NullIoBus;
+        let before = (0..10_000)
+            .find_map(|_| {
+                if cpu.state().pc == push_addresses[0] {
+                    let view = build_stack_view(
+                        Some(&program),
+                        &memory,
+                        cpu.state().pc,
+                        cpu.state().sp,
+                        StackViewOptions::default(),
+                    )
+                    .unwrap();
+                    if view.frames.len() >= minimum_frame_depth {
+                        return Some(view);
+                    }
+                }
+                assert!(!matches!(
+                    cpu.step(&mut memory, &mut io).unwrap(),
+                    StepOutcome::Halted
+                ));
+                None
+            })
+            .expect("selected PUSH was not reached");
+        let frame_sp = before.frames[0].frame_sp;
+        let fixed_addresses = fixed_slot_addresses(&before.frames[0]);
+        let dynamic_count = before.frames[0]
+            .slots
+            .iter()
+            .filter(|slot| {
+                matches!(
+                    slot.kind,
+                    StackSlotKind::OutgoingArgument { .. } | StackSlotKind::RuntimeArgument { .. }
+                )
+            })
+            .count();
+
+        cpu.step(&mut memory, &mut io).unwrap();
+        assert_eq!(cpu.state().pc, push_addresses[1]);
+        let before_store = build_stack_view(
+            Some(&program),
+            &memory,
+            cpu.state().pc,
+            cpu.state().sp,
+            StackViewOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(before_store.frames[0].frame_sp, frame_sp);
+        assert_eq!(
+            fixed_slot_addresses(&before_store.frames[0]),
+            fixed_addresses
+        );
+        assert_eq!(before_store.frames.len(), before.frames.len());
+        assert!(before.warnings.is_empty());
+        assert!(before_store.warnings.is_empty());
+        assert_eq!(
+            before_store.frames[0]
+                .slots
+                .iter()
+                .filter(|slot| {
+                    matches!(
+                        slot.kind,
+                        StackSlotKind::OutgoingArgument { .. }
+                            | StackSlotKind::RuntimeArgument { .. }
+                    )
+                })
+                .count(),
+            dynamic_count + 1
+        );
+
+        cpu.step(&mut memory, &mut io).unwrap();
+        let after = build_stack_view(
+            Some(&program),
+            &memory,
+            cpu.state().pc,
+            cpu.state().sp,
+            StackViewOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(after.frames[0].frame_sp, frame_sp);
+        assert_eq!(fixed_slot_addresses(&after.frames[0]), fixed_addresses);
+        assert_eq!(after.frames.len(), before.frames.len());
+        assert!(after.warnings.is_empty());
+        assert_eq!(
+            after.frames[0]
+                .slots
+                .iter()
+                .filter(|slot| {
+                    matches!(
+                        slot.kind,
+                        StackSlotKind::OutgoingArgument { .. }
+                            | StackSlotKind::RuntimeArgument { .. }
+                    )
+                })
+                .count(),
+            dynamic_count + 1
+        );
     }
 
     #[test]
@@ -851,6 +1035,230 @@ mod tests {
             partial_arguments,
             [(2, frame_sp.wrapping_add_signed(-1), 30)]
         );
+    }
+
+    #[test]
+    fn preserves_frame_across_single_argument_push_in_a_nested_call() {
+        assert_push_boundaries(
+            r#"
+                int id(int value) { return value; }
+                int caller(int seed) { int local; local = seed; return id(local); }
+                int main(void) { return caller(7); }
+            "#,
+            "caller",
+            "id",
+            2,
+        );
+    }
+
+    #[test]
+    fn preserves_frame_across_multiple_argument_pushes() {
+        assert_push_boundaries(
+            r#"
+                int sum3(int a, int b, int c) { return a + b + c; }
+                int main(void) { return sum3(1, 2, 3); }
+            "#,
+            "main",
+            "sum3",
+            1,
+        );
+    }
+
+    #[test]
+    fn preserves_recursive_call_stack_across_argument_push() {
+        assert_push_boundaries(
+            r#"
+                int fact(int n) {
+                    if (n <= 1) return 1;
+                    return n * fact(n - 1);
+                }
+                int main(void) { return fact(4); }
+            "#,
+            "fact",
+            "fact",
+            3,
+        );
+    }
+
+    #[test]
+    fn preserves_frame_across_runtime_helper_argument_push() {
+        assert_push_boundaries(
+            "int main(void) { return 6 * 7; }",
+            "main",
+            "__ex3_mul_i32",
+            1,
+        );
+    }
+
+    #[test]
+    fn fixed_slots_follow_prologue_and_epilogue_lifetime() {
+        let compilation = cc::compile_with_debug_info(
+            r#"
+                int target(int parameter) {
+                    int local;
+                    local = parameter;
+                    return local + 2;
+                }
+                int main(void) { return target(1); }
+            "#,
+        )
+        .unwrap();
+        let assembled = Assembler::new().assemble(&compilation.assembly).unwrap();
+        let program = link_program_debug_info(&compilation.debug_info, &assembled).unwrap();
+        let function = program
+            .functions
+            .iter()
+            .find(|function| function.name == "target")
+            .unwrap();
+        assert!(function.frame_size > 0);
+        let epilogue = program
+            .instructions
+            .keys()
+            .copied()
+            .find(|address| {
+                matches!(
+                    decode(assembled.image.cells.iter().find(|cell| cell.address == *address).unwrap().word),
+                    Ok(Instruction::Immediate { op: ImmediateOp::Adjsp, value })
+                        if value.as_i16() == function.frame_size as i16
+                ) && matches!(
+                    assembled
+                        .image
+                        .cells
+                        .iter()
+                        .find(|cell| cell.address == address.wrapping_add(1))
+                        .map(|cell| decode(cell.word)),
+                    Some(Ok(Instruction::System(crate::isa::SystemOp::Ret)))
+                )
+            })
+            .expect("epilogue ADJSP was not found");
+        let mut memory = ArrayMemory::from_image(&assembled.image);
+        let mut cpu = Cpu::new();
+        let mut io = NullIoBus;
+        while cpu.state().pc != function.address_start {
+            cpu.step(&mut memory, &mut io).unwrap();
+        }
+
+        let entry = build_stack_view(
+            Some(&program),
+            &memory,
+            cpu.state().pc,
+            cpu.state().sp,
+            StackViewOptions::default(),
+        )
+        .unwrap();
+        let entry_fixed = entry.frames[0]
+            .slots
+            .iter()
+            .filter(|slot| {
+                matches!(
+                    slot.kind,
+                    StackSlotKind::Local { .. } | StackSlotKind::Temporary { .. }
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(!entry_fixed.is_empty());
+        assert!(entry_fixed
+            .iter()
+            .all(|slot| slot.value_status == StackValueStatus::NotAllocated
+                && slot.typed_value.is_none()));
+
+        cpu.step(&mut memory, &mut io).unwrap();
+        let body = build_stack_view(
+            Some(&program),
+            &memory,
+            cpu.state().pc,
+            cpu.state().sp,
+            StackViewOptions::default(),
+        )
+        .unwrap();
+        assert!(body.frames[0].slots.iter().any(|slot| {
+            matches!(slot.kind, StackSlotKind::Local { .. })
+                && slot.value_status == StackValueStatus::CurrentStorage
+        }));
+
+        while cpu.state().pc != epilogue {
+            cpu.step(&mut memory, &mut io).unwrap();
+        }
+        let before_release = build_stack_view(
+            Some(&program),
+            &memory,
+            cpu.state().pc,
+            cpu.state().sp,
+            StackViewOptions::default(),
+        )
+        .unwrap();
+        assert!(before_release.frames[0].slots.iter().any(|slot| {
+            matches!(slot.kind, StackSlotKind::Local { .. })
+                && slot.value_status == StackValueStatus::CurrentStorage
+        }));
+
+        cpu.step(&mut memory, &mut io).unwrap();
+        let released = build_stack_view(
+            Some(&program),
+            &memory,
+            cpu.state().pc,
+            cpu.state().sp,
+            StackViewOptions::default(),
+        )
+        .unwrap();
+        assert!(released.frames[0]
+            .slots
+            .iter()
+            .filter(|slot| matches!(
+                slot.kind,
+                StackSlotKind::Local { .. } | StackSlotKind::Temporary { .. }
+            ))
+            .all(|slot| slot.value_status == StackValueStatus::Released
+                && slot.typed_value.is_none()));
+
+        let entry_control = entry.frames[0]
+            .slots
+            .iter()
+            .filter(|slot| {
+                matches!(
+                    slot.kind,
+                    StackSlotKind::Parameter { .. } | StackSlotKind::ReturnAddress
+                )
+            })
+            .map(|slot| (slot.kind.clone(), slot.address))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            entry.frames[0]
+                .slots
+                .iter()
+                .find(|slot| matches!(slot.kind, StackSlotKind::Parameter { index: 0 }))
+                .unwrap()
+                .typed_value,
+            Some(TypedStackValue::Signed(1))
+        );
+        let released_control = released.frames[0]
+            .slots
+            .iter()
+            .filter(|slot| {
+                matches!(
+                    slot.kind,
+                    StackSlotKind::Parameter { .. } | StackSlotKind::ReturnAddress
+                )
+            })
+            .map(|slot| (slot.kind.clone(), slot.address))
+            .collect::<Vec<_>>();
+        assert_eq!(entry_control, released_control);
+    }
+
+    #[test]
+    fn zero_sized_frames_are_always_allocated() {
+        let (program, _) = compile_program("int main(void) { return 0; }");
+        let main = program
+            .functions
+            .iter()
+            .find(|function| function.name == "main")
+            .unwrap();
+        assert_eq!(main.frame_size, 0);
+        assert!(program
+            .instructions
+            .values()
+            .filter(|instruction| instruction.function_id == main.id)
+            .all(|instruction| instruction.fixed_frame_state == FixedFrameState::Allocated));
     }
 
     #[test]

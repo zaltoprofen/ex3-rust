@@ -58,6 +58,13 @@ fn compile_step_and_run_are_callable_through_the_wasm_boundary() {
             .as_deref(),
         Some("return-address")
     );
+    assert_eq!(
+        Reflect::get(&slots.get(0), &JsValue::from_str("state"))
+            .unwrap()
+            .as_string()
+            .as_deref(),
+        Some("control")
+    );
     assert!(session.stack_view_with_depth(0).is_err());
     let snapshot = session.snapshot().unwrap();
     assert!(

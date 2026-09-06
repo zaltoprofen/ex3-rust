@@ -334,7 +334,9 @@ impl SessionCore {
 mod tests {
     use super::*;
     use crate::{
-        dto::{RunStatus, StackSlotKindDto, StackViewContextDto, StepOutcomeDto},
+        dto::{
+            RunStatus, StackSlotKindDto, StackSlotStateDto, StackViewContextDto, StepOutcomeDto,
+        },
         error::ErrorStage,
     };
     use ex3_core::emulator::IoBus;
@@ -654,5 +656,51 @@ mod tests {
         assert!(outgoing
             .iter()
             .all(|slot| slot.call_target.as_deref() == Some("add")));
+    }
+
+    #[test]
+    fn stack_view_dto_preserves_fixed_storage_lifetime() {
+        let mut session = SessionCore::new();
+        session
+            .compile_and_load("int main(void) { int local; local = 1; return local; }")
+            .unwrap();
+        session.step().unwrap();
+        let entry = session.stack_view().unwrap();
+        let entry_local = entry.frames[0]
+            .slots
+            .iter()
+            .find(|slot| slot.kind == StackSlotKindDto::Local)
+            .unwrap();
+        assert_eq!(entry_local.state, StackSlotStateDto::NotAllocated);
+        assert_eq!(entry_local.signed_value, None);
+
+        session.step().unwrap();
+        let allocated = session.stack_view().unwrap();
+        let allocated_local = allocated.frames[0]
+            .slots
+            .iter()
+            .find(|slot| slot.kind == StackSlotKindDto::Local)
+            .unwrap();
+        assert_eq!(allocated_local.state, StackSlotStateDto::CurrentStorage);
+
+        let released = (0..100)
+            .find_map(|_| {
+                let view = session.stack_view().unwrap();
+                let local = view
+                    .frames
+                    .first()?
+                    .slots
+                    .iter()
+                    .find(|slot| slot.kind == StackSlotKindDto::Local)?;
+                if local.state == StackSlotStateDto::Released {
+                    Some((local.signed_value, local.raw_value))
+                } else {
+                    session.step().unwrap();
+                    None
+                }
+            })
+            .expect("released frame state was not observed");
+        assert_eq!(released.0, None);
+        assert_eq!(released.1, 1);
     }
 }

@@ -88,6 +88,10 @@ pub struct MemoryImage {
 pub struct AssemblySourceMapEntry {
     pub address: Address,
     pub span: Span,
+    /// Zero-based position of this word within the source statement's expansion.
+    pub expansion_index: u16,
+    /// Resolved machine instruction, or `None` for data/symbol cells.
+    pub instruction: Option<Instruction>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AssemblyResult {
@@ -181,7 +185,7 @@ impl Assembler {
             };
             match resolve(statement, &lookup, line.line) {
                 Ok(words) => {
-                    for (word, kind) in words {
+                    for (expansion_index, (word, kind)) in words.into_iter().enumerate() {
                         if lc > 0xffff {
                             errors.push(err(line.line, AsmErrorKind::AddressOutOfRange(lc)));
                             lc += 1;
@@ -204,6 +208,10 @@ impl Assembler {
                                 line: line.line,
                                 column: 1,
                             },
+                            expansion_index: u16::try_from(expansion_index)
+                                .expect("statement expansion exceeds u16"),
+                            instruction: (kind == CellKind::Instruction)
+                                .then(|| crate::isa::decode(word).expect("resolved instruction")),
                         });
                         lc += 1;
                     }
@@ -613,14 +621,26 @@ mod tests {
                 AssemblySourceMapEntry {
                     address: Address::new(0x0010).unwrap(),
                     span: Span { line: 3, column: 1 },
+                    expansion_index: 0,
+                    instruction: Some(Instruction::Immediate {
+                        op: ImmediateOp::Lda,
+                        value: Immediate16::from_raw(1),
+                    }),
                 },
                 AssemblySourceMapEntry {
                     address: Address::new(0x0011).unwrap(),
                     span: Span { line: 4, column: 1 },
+                    expansion_index: 0,
+                    instruction: Some(Instruction::Immediate {
+                        op: ImmediateOp::Add,
+                        value: Immediate16::from_raw(2),
+                    }),
                 },
                 AssemblySourceMapEntry {
                     address: Address::new(0x0012).unwrap(),
                     span: Span { line: 5, column: 1 },
+                    expansion_index: 0,
+                    instruction: Some(Instruction::System(SystemOp::Hlt)),
                 },
             ]
         );
@@ -635,12 +655,16 @@ mod tests {
         assert_eq!(result.source_map.len(), 2);
         assert_eq!(result.source_map[0].address.get(), 0x0020);
         assert_eq!(result.source_map[0].span.line, 3);
+        assert_eq!(result.source_map[0].expansion_index, 0);
+        assert_eq!(result.source_map[0].instruction, None);
         assert_eq!(result.source_map[1].address.get(), 0x0021);
         assert_eq!(result.source_map[1].span.line, 4);
+        assert_eq!(result.source_map[1].expansion_index, 0);
+        assert_eq!(result.source_map[1].instruction, None);
     }
 
     #[test]
-    fn source_map_maps_all_pseudo_instruction_words_to_the_same_line() {
+    fn source_map_distinguishes_words_within_pseudo_instruction_expansions() {
         let result = Assembler::new()
             .assemble("ORG 0x0100\nPUSH\nPOP\nEND\n")
             .unwrap();
@@ -648,11 +672,55 @@ mod tests {
         let mappings: Vec<_> = result
             .source_map
             .iter()
-            .map(|entry| (entry.address.get(), entry.span.line))
+            .map(|entry| {
+                (
+                    entry.address.get(),
+                    entry.span.line,
+                    entry.expansion_index,
+                    entry.instruction,
+                )
+            })
             .collect();
         assert_eq!(
             mappings,
-            vec![(0x0100, 2), (0x0101, 2), (0x0102, 3), (0x0103, 3)]
+            vec![
+                (
+                    0x0100,
+                    2,
+                    0,
+                    Some(Instruction::Immediate {
+                        op: ImmediateOp::Adjsp,
+                        value: Immediate16::from_raw(0xffff),
+                    }),
+                ),
+                (
+                    0x0101,
+                    2,
+                    1,
+                    Some(Instruction::SpRelative {
+                        op: SpRelativeOp::Stsp,
+                        offset: Immediate16::from_raw(0),
+                    }),
+                ),
+                (
+                    0x0102,
+                    3,
+                    0,
+                    Some(Instruction::SpRelative {
+                        op: SpRelativeOp::Ldsp,
+                        offset: Immediate16::from_raw(0),
+                    }),
+                ),
+                (
+                    0x0103,
+                    3,
+                    1,
+                    Some(Instruction::Immediate {
+                        op: ImmediateOp::Adjsp,
+                        value: Immediate16::from_raw(1),
+                    }),
+                ),
+            ]
         );
     }
 

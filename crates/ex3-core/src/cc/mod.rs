@@ -10,10 +10,10 @@ mod sema;
 pub use ast::ScalarType;
 pub use debug::{
     ActiveTemporaryDebugInfo, AssemblyLineDebugInfo, Compilation, CompilerDebugInfo,
-    DynamicStackSlotDebugInfo, DynamicStackSlotKind, EmitDebugContext, FunctionDebugId,
-    FunctionDebugSymbols, FunctionFrameDebugInfo, GeneratedAssembly, LocalDebugSymbol,
-    LocalSlotDebugInfo, ParameterDebugSymbol, ParameterSlotDebugInfo, ReturnAddressSlotDebugInfo,
-    TemporaryRole,
+    DynamicStackSlotDebugInfo, DynamicStackSlotKind, EmitDebugContext, FixedFrameState,
+    FunctionDebugId, FunctionDebugSymbols, FunctionFrameDebugInfo, GeneratedAssembly,
+    LocalDebugSymbol, LocalSlotDebugInfo, ParameterDebugSymbol, ParameterSlotDebugInfo,
+    ReturnAddressSlotDebugInfo, TemporaryRole,
 };
 pub use diagnostic::{CcError, CcErrors, Span};
 
@@ -178,7 +178,7 @@ mod tests {
     }
 
     #[test]
-    fn debug_compilation_preserves_assembly_and_memory_images() {
+    fn compile_wrapper_matches_debug_compile() {
         for source in [
             "int main(void) { return 42; }",
             "int add(int a, int b) { return a + b; } int main(void) { return add(3, 4); }",

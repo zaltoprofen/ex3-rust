@@ -377,6 +377,11 @@ button:disabled {
   color: #91a4ba;
 }
 
+.invalid-storage-slot {
+  color: #9aa7b7;
+  background: rgba(91, 105, 122, 0.12);
+}
+
 .panel-heading-row {
   display: flex;
   align-items: center;

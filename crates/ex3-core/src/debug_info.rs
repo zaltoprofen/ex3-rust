@@ -3,13 +3,13 @@
 use crate::{
     assembler::{AssemblyResult, CellKind},
     cc::{
-        ActiveTemporaryDebugInfo, CompilerDebugInfo, DynamicStackSlotDebugInfo, FunctionDebugId,
-        LocalSlotDebugInfo, ParameterSlotDebugInfo, ReturnAddressSlotDebugInfo,
+        ActiveTemporaryDebugInfo, CompilerDebugInfo, DynamicStackSlotDebugInfo, FixedFrameState,
+        FunctionDebugId, LocalSlotDebugInfo, ParameterSlotDebugInfo, ReturnAddressSlotDebugInfo,
     },
-    isa::Address,
+    isa::{Address, Instruction, SpRelativeOp},
 };
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     error::Error,
     fmt,
 };
@@ -114,6 +114,7 @@ pub struct InstructionDebugInfo {
     /// `canonical_frame_sp = current_sp + frame_base_delta` immediately before
     /// the instruction executes.
     pub frame_base_delta: i32,
+    pub fixed_frame_state: FixedFrameState,
     pub active_temporaries: Vec<ActiveTemporaryDebugInfo>,
     pub dynamic_stack_slots: Vec<DynamicStackSlotDebugInfo>,
 }
@@ -232,7 +233,7 @@ pub fn link_program_debug_info(
         .iter()
         .map(|function| function.id)
         .collect::<HashSet<_>>();
-    let mut states_by_line = HashMap::with_capacity(compiler.assembly_lines.len());
+    let mut states_by_line = BTreeMap::new();
     for state in &compiler.assembly_lines {
         if !known_functions.contains(&state.function_id) {
             errors.push(DebugInfoLinkError::UnknownFunction(state.function_id));
@@ -261,17 +262,34 @@ pub fn link_program_debug_info(
             errors.push(DebugInfoLinkError::AssemblyLineOutOfRange(source.span.line));
             continue;
         };
-        let Some(state) = states_by_line.get(&line) else {
+        let Some(state) = states_by_line.get(&line).copied() else {
             continue;
         };
+        let post_statement_state = states_by_line
+            .range((std::ops::Bound::Excluded(line), std::ops::Bound::Unbounded))
+            .map(|(_, candidate)| *candidate)
+            .find(|candidate| candidate.function_id == state.function_id);
+        let mut frame_base_delta = state.frame_base_delta;
+        let mut active_temporaries = state.active_temporaries.clone();
+        let mut dynamic_stack_slots = state.dynamic_stack_slots.clone();
+        if is_push_store(source.expansion_index, source.instruction) {
+            frame_base_delta = frame_base_delta
+                .checked_add(1)
+                .expect("compiler stack adjustment exceeds i32");
+            if let Some(post) = post_statement_state {
+                active_temporaries = post.active_temporaries.clone();
+                dynamic_stack_slots = post.dynamic_stack_slots.clone();
+            }
+        }
         linked_lines.insert(line);
         instructions.insert(
             source.address,
             InstructionDebugInfo {
                 function_id: state.function_id,
-                frame_base_delta: state.frame_base_delta,
-                active_temporaries: state.active_temporaries.clone(),
-                dynamic_stack_slots: state.dynamic_stack_slots.clone(),
+                frame_base_delta,
+                fixed_frame_state: state.fixed_frame_state,
+                active_temporaries,
+                dynamic_stack_slots,
             },
         );
     }
@@ -345,6 +363,17 @@ pub fn link_program_debug_info(
     } else {
         Err(DebugInfoLinkErrors(errors))
     }
+}
+
+fn is_push_store(expansion_index: u16, instruction: Option<Instruction>) -> bool {
+    expansion_index > 0
+        && matches!(
+            instruction,
+            Some(Instruction::SpRelative {
+                op: SpRelativeOp::Stsp,
+                offset,
+            }) if offset.as_i16() == 0
+        )
 }
 
 fn link_symbols(
@@ -487,7 +516,7 @@ mod tests {
     }
 
     #[test]
-    fn maps_every_pseudo_word_to_the_same_instruction_state() {
+    fn adjusts_debug_state_within_push_expansion() {
         let (compilation, assembled, linked) = compile_assemble_link(
             r#"
                 int identity(int value) { return value; }
@@ -495,19 +524,25 @@ mod tests {
             "#,
         );
         let push_line = assembly_line(&compilation.assembly, "PUSH");
-        let addresses = assembled
+        let entries = assembled
             .source_map
             .iter()
             .filter(|entry| entry.span.line == push_line as usize)
-            .map(|entry| entry.address)
             .collect::<Vec<_>>();
 
-        assert_eq!(addresses.len(), 2);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].expansion_index, 0);
+        assert_eq!(entries[1].expansion_index, 1);
+        let before_adjust = linked.instruction(entries[0].address).unwrap();
+        let before_store = linked.instruction(entries[1].address).unwrap();
         assert_eq!(
-            linked.instruction(addresses[0]),
-            linked.instruction(addresses[1])
+            before_store.frame_base_delta,
+            before_adjust.frame_base_delta + 1
         );
-        assert!(linked.instruction(addresses[0]).is_some());
+        assert_eq!(
+            before_store.dynamic_stack_slots.len(),
+            before_adjust.dynamic_stack_slots.len() + 1
+        );
     }
 
     #[test]

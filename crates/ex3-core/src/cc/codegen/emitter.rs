@@ -150,6 +150,7 @@ impl Emitter {
                 assembly_line,
                 function_id: context.function_id,
                 frame_base_delta: context.frame_base_delta,
+                fixed_frame_state: context.fixed_frame_state,
                 active_temporaries: context.active_temporaries.clone(),
                 dynamic_stack_slots: context.dynamic_stack_slots.clone(),
             });

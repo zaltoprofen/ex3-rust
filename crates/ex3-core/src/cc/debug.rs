@@ -40,6 +40,7 @@ pub struct AssemblyLineDebugInfo {
     /// `canonical_frame_sp = current_sp + frame_base_delta` immediately before
     /// this instruction executes (with EX3's 16-bit address wrapping).
     pub frame_base_delta: i32,
+    pub fixed_frame_state: FixedFrameState,
     pub active_temporaries: Vec<ActiveTemporaryDebugInfo>,
     pub dynamic_stack_slots: Vec<DynamicStackSlotDebugInfo>,
 }
@@ -49,8 +50,16 @@ pub struct EmitDebugContext {
     pub function_id: FunctionDebugId,
     /// See [`AssemblyLineDebugInfo::frame_base_delta`].
     pub frame_base_delta: i32,
+    pub fixed_frame_state: FixedFrameState,
     pub active_temporaries: Vec<ActiveTemporaryDebugInfo>,
     pub dynamic_stack_slots: Vec<DynamicStackSlotDebugInfo>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FixedFrameState {
+    NotAllocated,
+    Allocated,
+    Released,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

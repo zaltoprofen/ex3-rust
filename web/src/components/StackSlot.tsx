@@ -7,14 +7,14 @@ interface StackSlotProps {
 }
 
 export function StackSlot({ slot, disabled, onSelectAddress }: StackSlotProps) {
-  const state =
-    slot.kind === "temporary"
-      ? slot.active
-        ? "active"
-        : "inactive / scratch"
-      : "";
+  const state = formatState(slot);
+  const rowClass = slot.active
+    ? "active-slot"
+    : ["not-allocated", "released"].includes(slot.state)
+      ? "invalid-storage-slot"
+      : undefined;
   return (
-    <tr className={slot.active ? "active-slot" : undefined}>
+    <tr className={rowClass}>
       <td>
         <button
           type="button"
@@ -43,10 +43,29 @@ export function StackSlot({ slot, disabled, onSelectAddress }: StackSlotProps) {
 
 export function primaryValue(slot: StackSlotDto): string {
   if (slot.kind === "return-address") return `0x${hex(slot.rawValue & 0xffff, 4)}`;
-  if (slot.active === false) return "—";
+  if (!["value", "current-storage"].includes(slot.state)) return "—";
   if (slot.signedValue !== null) return String(slot.signedValue);
   if (slot.unsignedValue !== null) return String(slot.unsignedValue);
   return "—";
+}
+
+export function formatState(slot: StackSlotDto): string {
+  switch (slot.state) {
+    case "value":
+      return slot.kind === "temporary" ? "active" : "";
+    case "current-storage":
+      return "";
+    case "inactive-scratch":
+      return "inactive / scratch";
+    case "not-allocated":
+      return "not allocated";
+    case "released":
+      return "released";
+    case "control":
+      return "control";
+    case "unknown":
+      return "unknown";
+  }
 }
 
 export function formatOffset(offset: number): string {

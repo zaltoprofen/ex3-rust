@@ -15,6 +15,7 @@ const slot = (overrides: Partial<StackSlotDto>): StackSlotDto => ({
   signedValue: 1,
   unsignedValue: null,
   active: null,
+  state: "current-storage",
   description: null,
   argumentIndex: null,
   callTarget: null,
@@ -70,8 +71,8 @@ describe("Stack View", () => {
     const slots = [
       slot({ kind: "parameter", name: "signed", signedValue: -1, rawValue: 0xffffffff, frameOffset: 5 }),
       slot({ kind: "local", name: "unsigned", typeName: "uint32_t", signedValue: null, unsignedValue: 4294967295, rawValue: 0xffffffff }),
-      slot({ kind: "temporary", name: "temporary #0", active: true, description: "value of n - 1" }),
-      slot({ kind: "temporary", name: "temporary #1", active: false, signedValue: null, rawValue: 2 }),
+      slot({ kind: "temporary", name: "temporary #0", active: true, state: "value", description: "value of n - 1" }),
+      slot({ kind: "temporary", name: "temporary #1", active: false, state: "inactive-scratch", signedValue: null, rawValue: 2 }),
       slot({ kind: "outgoing-argument", name: "second", frameOffset: -1, argumentIndex: 1, callTarget: "sum", address: 0xffe7 }),
       slot({ kind: "outgoing-argument", name: "first", frameOffset: -2, argumentIndex: 0, callTarget: "sum", address: 0xffe6 }),
       slot({ kind: "runtime-argument", name: "lhs", argumentIndex: 0, callTarget: "__ex3_mul_i32" }),
@@ -122,10 +123,38 @@ describe("Stack View", () => {
     expect(toggleFrame(new Set<number>(), 1).has(1)).toBe(true);
   });
 
+  it("distinguishes unallocated and released storage from inactive scratch", () => {
+    const html = renderToStaticMarkup(
+      <StackView
+        snapshot={snapshot({
+          frames: [
+            frame({
+              slots: [
+                slot({ name: "before", state: "not-allocated", signedValue: null, rawValue: 0x11111111 }),
+                slot({ name: "after", state: "released", signedValue: null, rawValue: 0x22222222 }),
+                slot({ kind: "temporary", name: "scratch", state: "inactive-scratch", active: false, signedValue: null }),
+              ],
+            }),
+          ],
+        })}
+        error={null}
+        loading={false}
+        onSelectAddress={vi.fn()}
+      />,
+    );
+
+    expect(html).toContain("not allocated");
+    expect(html).toContain("released");
+    expect(html).toContain("inactive / scratch");
+    expect(html).toContain("0x11111111");
+    expect(primaryValue(slot({ state: "not-allocated", signedValue: 99 }))).toBe("—");
+    expect(primaryValue(slot({ state: "released", signedValue: 99 }))).toBe("—");
+  });
+
   it("formats values and logical outgoing argument order", () => {
     expect(primaryValue(slot({ signedValue: -1 }))).toBe("-1");
     expect(primaryValue(slot({ signedValue: null, unsignedValue: 0xffffffff }))).toBe("4294967295");
-    expect(primaryValue(slot({ kind: "temporary", active: false }))).toBe("—");
+    expect(primaryValue(slot({ kind: "temporary", active: false, state: "inactive-scratch" }))).toBe("—");
     expect(formatOffset(3)).toBe("+3");
     expect(formatOffset(-2)).toBe("-2");
     const outgoing = sortSlots([
