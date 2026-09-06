@@ -7,3 +7,4 @@ pub mod debugger;
 pub mod emulator;
 pub mod isa;
 pub mod output;
+pub mod stack_view;

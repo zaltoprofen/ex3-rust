@@ -18,6 +18,7 @@ use std::{
 pub struct ProgramDebugInfo {
     pub functions: Vec<LinkedFunctionDebugInfo>,
     pub instructions: BTreeMap<Address, InstructionDebugInfo>,
+    pub symbols: BTreeMap<String, Address>,
 }
 
 impl ProgramDebugInfo {
@@ -260,6 +261,7 @@ pub fn link_program_debug_info(
         Ok(ProgramDebugInfo {
             functions,
             instructions,
+            symbols: assembled.symbols.clone(),
         })
     } else {
         Err(DebugInfoLinkErrors(errors))
