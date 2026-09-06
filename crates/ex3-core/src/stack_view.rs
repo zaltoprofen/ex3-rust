@@ -272,6 +272,9 @@ pub fn build_stack_view(
         view.frames.push(frame);
 
         let Some(caller_instruction) = program.instruction(return_address) else {
+            if is_normal_unwind_boundary(program, return_address) {
+                break;
+            }
             view.warnings.push(format!(
                 "Unable to unwind beyond frame `{}`: return address {} has no C debug metadata.",
                 function.name, return_address
@@ -299,6 +302,13 @@ pub fn build_stack_view(
         pc_kind = FrameProgramCounterKind::SuspendedReturn;
     }
     Ok(view)
+}
+
+fn is_normal_unwind_boundary(program: &ProgramDebugInfo, return_address: Address) -> bool {
+    matches!(
+        classify_non_c_context(program, return_address, None),
+        StackViewContext::Startup
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -844,6 +854,136 @@ mod tests {
     }
 
     #[test]
+    fn main_to_startup_is_a_normal_unwind_boundary() {
+        let (program, mut memory) = compile_program("int main(void) { return 0; }");
+        let mut cpu = Cpu::new();
+        let mut io = NullIoBus;
+        let view = (0..100)
+            .find_map(|_| {
+                let view = build_stack_view(
+                    Some(&program),
+                    &memory,
+                    cpu.state().pc,
+                    cpu.state().sp,
+                    StackViewOptions::default(),
+                )
+                .unwrap();
+                if view
+                    .frames
+                    .first()
+                    .is_some_and(|frame| frame.function == "main")
+                {
+                    Some(view)
+                } else {
+                    assert!(!matches!(
+                        cpu.step(&mut memory, &mut io).unwrap(),
+                        StepOutcome::Halted
+                    ));
+                    None
+                }
+            })
+            .expect("main was not entered");
+
+        assert_eq!(view.frames.len(), 1);
+        assert_eq!(view.frames[0].function, "main");
+        assert!(
+            view.warnings.is_empty(),
+            "unexpected warnings: {:?}",
+            view.warnings
+        );
+    }
+
+    #[test]
+    fn nested_c_frames_unwind_to_startup_without_a_warning() {
+        let (program, mut memory) = compile_program(
+            r#"
+                int foo(void) { return 42; }
+                int main(void) { return foo(); }
+            "#,
+        );
+        let mut cpu = Cpu::new();
+        let mut io = NullIoBus;
+        let view = (0..100)
+            .find_map(|_| {
+                let view = build_stack_view(
+                    Some(&program),
+                    &memory,
+                    cpu.state().pc,
+                    cpu.state().sp,
+                    StackViewOptions::default(),
+                )
+                .unwrap();
+                let functions = view
+                    .frames
+                    .iter()
+                    .map(|frame| frame.function.as_str())
+                    .collect::<Vec<_>>();
+                if functions == ["foo", "main"] {
+                    Some(view)
+                } else {
+                    assert!(!matches!(
+                        cpu.step(&mut memory, &mut io).unwrap(),
+                        StepOutcome::Halted
+                    ));
+                    None
+                }
+            })
+            .expect("foo and main frames were not reconstructed");
+
+        assert!(
+            view.warnings.is_empty(),
+            "unexpected warnings: {:?}",
+            view.warnings
+        );
+    }
+
+    #[test]
+    fn unknown_return_address_remains_an_unwind_warning() {
+        let (program, mut memory) = compile_program(
+            r#"
+                int foo(void) { return 42; }
+                int main(void) { return foo(); }
+            "#,
+        );
+        let pc = mapped_address(&program, "foo", |state| state.frame_base_delta == 0);
+        let frame_size = program
+            .functions
+            .iter()
+            .find(|function| function.name == "foo")
+            .unwrap()
+            .frame_size;
+        let unknown_return = (0..=u16::MAX)
+            .map(|raw| Address::new(raw).unwrap())
+            .find(|address| {
+                program.instruction(*address).is_none()
+                    && matches!(
+                        classify_non_c_context(&program, *address, None),
+                        StackViewContext::Unmapped
+                    )
+            })
+            .expect("program has no unmapped address");
+        let frame_sp = Address::new(0x4000).unwrap();
+        memory.write(
+            frame_sp.wrapping_add(frame_size),
+            u32::from(unknown_return.get()),
+        );
+
+        let view = build_stack_view(
+            Some(&program),
+            &memory,
+            pc,
+            frame_sp,
+            StackViewOptions::default(),
+        )
+        .unwrap();
+
+        assert!(view
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("no C debug metadata")));
+    }
+
+    #[test]
     fn distinguishes_runtime_arguments_from_user_arguments() {
         let (program, mut memory) = compile_program("int main(void) { return 2 * 3; }");
         let call_pc = mapped_address(&program, "main", |state| {
@@ -943,6 +1083,11 @@ mod tests {
             frame.program_counter_kind == FrameProgramCounterKind::SuspendedReturn
                 && frame.program_counter.symbol.is_some()
         }));
+        assert!(
+            view.warnings.is_empty(),
+            "unexpected warnings: {:?}",
+            view.warnings
+        );
     }
 
     #[test]
