@@ -2,7 +2,9 @@
 
 use crate::{
     cc::{DynamicStackSlotKind, FunctionDebugId, ScalarType, TemporaryRole},
-    debug_info::{InstructionDebugInfo, LinkedFunctionDebugInfo, ProgramDebugInfo},
+    debug_info::{
+        InstructionDebugInfo, LinkedFunctionDebugInfo, LinkedSymbolKind, ProgramDebugInfo,
+    },
     emulator::Memory,
     isa::{Address, Word},
 };
@@ -355,7 +357,7 @@ fn build_frame(
         raw: return_raw,
         typed_value: None,
         value_status: StackValueStatus::Control,
-        return_target: Some(symbolicate(program, return_address)),
+        return_target: Some(symbolicate_nearest(program, return_address)),
     });
     for local in &function.locals {
         slots.push(read_slot(
@@ -442,7 +444,7 @@ fn build_frame(
             function: function.name.clone(),
             current_sp,
             frame_sp,
-            program_counter: symbolicate(program, pc),
+            program_counter: symbolicate_nearest(program, pc),
             program_counter_kind: pc_kind,
             slots,
         },
@@ -523,7 +525,7 @@ fn add_signed(address: Address, offset: i32) -> Result<Address, StackViewError> 
     Ok(address.wrapping_add_signed(offset))
 }
 
-fn symbolicate(program: &ProgramDebugInfo, address: Address) -> SymbolicAddress {
+fn symbolicate_nearest(program: &ProgramDebugInfo, address: Address) -> SymbolicAddress {
     if let Some(instruction) = program.instruction(address) {
         if let Some(function) = program.function(instruction.function_id) {
             return SymbolicAddress {
@@ -533,21 +535,11 @@ fn symbolicate(program: &ProgramDebugInfo, address: Address) -> SymbolicAddress 
             };
         }
     }
-    let symbol = program
-        .symbols
-        .iter()
-        .filter(|(_, symbol_address)| **symbol_address <= address)
-        .max_by_key(|(_, symbol_address)| **symbol_address)
-        .map(|(name, symbol_address)| {
-            (
-                name.clone(),
-                address.get().wrapping_sub(symbol_address.get()),
-            )
-        });
+    let symbol = program.nearest_symbol(address);
     SymbolicAddress {
         address,
-        symbol: symbol.as_ref().map(|(name, _)| name.clone()),
-        offset: symbol.map(|(_, offset)| offset),
+        symbol: symbol.as_ref().map(|symbol| symbol.name.clone()),
+        offset: symbol.map(|symbol| symbol.offset),
     }
 }
 
@@ -559,25 +551,36 @@ fn classify_non_c_context(
     if hint == Some(NonCContextHint::Interrupt) {
         return StackViewContext::Interrupt;
     }
-    let symbol = symbolicate(program, pc).symbol;
-    if let Some(symbol) = symbol
-        .as_ref()
-        .filter(|symbol| symbol.starts_with("__ex3_"))
-    {
-        return StackViewContext::Runtime {
-            symbol: symbol.clone(),
-        };
+    if let Some(symbol) = program.symbol_at(pc) {
+        match symbol.kind {
+            LinkedSymbolKind::Runtime => {
+                return StackViewContext::Runtime {
+                    symbol: symbol.name.clone(),
+                };
+            }
+            LinkedSymbolKind::Assembly => {
+                return StackViewContext::Assembly {
+                    symbol: Some(symbol.name.clone()),
+                };
+            }
+            LinkedSymbolKind::CFunction | LinkedSymbolKind::Data | LinkedSymbolKind::Other => {}
+        }
     }
     let first_function = program
         .functions
         .iter()
         .map(|function| function.address_start)
         .min();
-    if pc >= Address::RESET && first_function.is_some_and(|start| pc < start) {
+    if pc >= Address::RESET
+        && first_function.is_some_and(|start| pc < start)
+        && program.is_executable(pc)
+    {
         return StackViewContext::Startup;
     }
-    if hint == Some(NonCContextHint::Assembly) || symbol.is_some() {
-        StackViewContext::Assembly { symbol }
+    if hint == Some(NonCContextHint::Assembly) {
+        StackViewContext::Assembly {
+            symbol: program.nearest_symbol(pc).map(|symbol| symbol.name),
+        }
     } else {
         StackViewContext::Unmapped
     }
@@ -960,7 +963,7 @@ mod tests {
         assert_eq!(startup.context, StackViewContext::Startup);
         assert_eq!(startup.raw_stack.len(), MAX_RAW_STACK_WORDS);
         assert!(!startup.warnings.is_empty());
-        let runtime_pc = program.symbols["__ex3_mul_i32"];
+        let runtime_pc = program.symbol_address("__ex3_mul_i32").unwrap();
         let runtime = build_stack_view(
             Some(&program),
             &memory,
@@ -970,6 +973,18 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(runtime.context, StackViewContext::Runtime { .. }));
+        let runtime_inside = build_stack_view(
+            Some(&program),
+            &memory,
+            runtime_pc.wrapping_add(1),
+            Address::ZERO,
+            StackViewOptions::default(),
+        )
+        .unwrap();
+        assert!(matches!(
+            runtime_inside.context,
+            StackViewContext::Runtime { .. }
+        ));
 
         let assembled = Assembler::new()
             .assemble("ORG 0x0200\nhandler:\nHLT\nEND\n")
@@ -989,6 +1004,15 @@ mod tests {
             assembly.context,
             StackViewContext::Assembly { .. }
         ));
+        let outside_assembly = build_stack_view(
+            Some(&assembly_program),
+            &assembly_memory,
+            Address::new(0x0201).unwrap(),
+            Address::ZERO,
+            StackViewOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(outside_assembly.context, StackViewContext::Unmapped);
         let interrupt = build_stack_view(
             Some(&assembly_program),
             &assembly_memory,
@@ -1010,6 +1034,43 @@ mod tests {
         )
         .unwrap();
         assert_eq!(unmapped.context, StackViewContext::Unmapped);
+    }
+
+    #[test]
+    fn nearest_runtime_symbol_does_not_classify_an_out_of_range_pc() {
+        let assembled = Assembler::new()
+            .assemble("ORG 0x0100\n__ex3_fake:\nHLT\nORG 0x0180\ndata: HEX 00000000\nEND\n")
+            .unwrap();
+        let program = link_program_debug_info(&CompilerDebugInfo::default(), &assembled).unwrap();
+        let memory = ArrayMemory::from_image(&assembled.image);
+        let outside = Address::new(0x0101).unwrap();
+
+        assert_eq!(program.nearest_symbol(outside).unwrap().name, "__ex3_fake");
+        assert!(program.symbol_at(outside).is_none());
+        let view = build_stack_view(
+            Some(&program),
+            &memory,
+            outside,
+            Address::ZERO,
+            StackViewOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(view.context, StackViewContext::Unmapped);
+
+        let data = Address::new(0x0180).unwrap();
+        assert_eq!(
+            program.symbol_at(data).unwrap().kind,
+            LinkedSymbolKind::Data
+        );
+        let view = build_stack_view(
+            Some(&program),
+            &memory,
+            data,
+            Address::ZERO,
+            StackViewOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(view.context, StackViewContext::Unmapped);
     }
 
     #[test]

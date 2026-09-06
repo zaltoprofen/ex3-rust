@@ -18,7 +18,9 @@ use std::{
 pub struct ProgramDebugInfo {
     pub functions: Vec<LinkedFunctionDebugInfo>,
     pub instructions: BTreeMap<Address, InstructionDebugInfo>,
-    pub symbols: BTreeMap<String, Address>,
+    symbols: BTreeMap<String, Address>,
+    linked_symbols: Vec<LinkedSymbolInfo>,
+    executable_addresses: BTreeSet<Address>,
 }
 
 impl ProgramDebugInfo {
@@ -28,6 +30,80 @@ impl ProgramDebugInfo {
 
     pub fn function(&self, id: FunctionDebugId) -> Option<&LinkedFunctionDebugInfo> {
         self.functions.iter().find(|function| function.id == id)
+    }
+
+    pub fn symbol_address(&self, name: &str) -> Option<Address> {
+        self.symbols.get(name).copied()
+    }
+
+    /// Finds the closest preceding symbol for display only. This does not mean
+    /// that `address` belongs to the returned symbol's range.
+    pub fn nearest_symbol(&self, address: Address) -> Option<NearestSymbol> {
+        self.symbols
+            .iter()
+            .filter(|(_, symbol_address)| **symbol_address <= address)
+            .max_by_key(|(_, symbol_address)| **symbol_address)
+            .map(|(name, symbol_address)| NearestSymbol {
+                name: name.clone(),
+                address: *symbol_address,
+                offset: address.get().wrapping_sub(symbol_address.get()),
+            })
+    }
+
+    /// Returns a symbol only when `address` lies in its linked cell range.
+    pub fn symbol_at(&self, address: Address) -> Option<&LinkedSymbolInfo> {
+        self.linked_symbols
+            .iter()
+            .filter(|symbol| symbol.contains(address))
+            .max_by_key(|symbol| symbol_kind_priority(symbol.kind))
+    }
+
+    pub fn is_executable(&self, address: Address) -> bool {
+        self.executable_addresses.contains(&address)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NearestSymbol {
+    pub name: String,
+    pub address: Address,
+    pub offset: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinkedSymbolKind {
+    CFunction,
+    Runtime,
+    Assembly,
+    Data,
+    Other,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinkedSymbolInfo {
+    pub name: String,
+    pub address_start: Address,
+    pub address_end_exclusive: Address,
+    pub kind: LinkedSymbolKind,
+}
+
+impl LinkedSymbolInfo {
+    pub fn contains(&self, address: Address) -> bool {
+        FunctionAddressRange {
+            start: self.address_start,
+            end_exclusive: self.address_end_exclusive,
+        }
+        .contains(address)
+    }
+}
+
+const fn symbol_kind_priority(kind: LinkedSymbolKind) -> u8 {
+    match kind {
+        LinkedSymbolKind::Runtime => 5,
+        LinkedSymbolKind::CFunction => 4,
+        LinkedSymbolKind::Assembly => 3,
+        LinkedSymbolKind::Data => 2,
+        LinkedSymbolKind::Other => 1,
     }
 }
 
@@ -257,15 +333,79 @@ pub fn link_program_debug_info(
         });
     }
 
+    let linked_symbols = link_symbols(compiler, assembled, &instructions);
     if errors.is_empty() {
         Ok(ProgramDebugInfo {
             functions,
             instructions,
             symbols: assembled.symbols.clone(),
+            linked_symbols,
+            executable_addresses: executable_addresses.into_iter().collect(),
         })
     } else {
         Err(DebugInfoLinkErrors(errors))
     }
+}
+
+fn link_symbols(
+    compiler: &CompilerDebugInfo,
+    assembled: &AssemblyResult,
+    instructions: &BTreeMap<Address, InstructionDebugInfo>,
+) -> Vec<LinkedSymbolInfo> {
+    let cells = assembled
+        .image
+        .cells
+        .iter()
+        .map(|cell| (cell.address, cell.kind))
+        .collect::<BTreeMap<_, _>>();
+    let c_function_names = compiler
+        .functions
+        .iter()
+        .map(|function| function.name.as_str())
+        .collect::<HashSet<_>>();
+    let distinct_starts = assembled.symbols.values().copied().collect::<BTreeSet<_>>();
+    assembled
+        .symbols
+        .iter()
+        .filter_map(|(name, start)| {
+            let cell_kind = cells.get(start).copied()?;
+            let instruction_cells = cell_kind == CellKind::Instruction;
+            let next_start = distinct_starts
+                .range((
+                    std::ops::Bound::Excluded(*start),
+                    std::ops::Bound::Unbounded,
+                ))
+                .next()
+                .copied();
+            let mut last = *start;
+            while let Some(next_value) = last.get().checked_add(1) {
+                let next = Address::from_low16(u32::from(next_value));
+                if next_start.is_some_and(|limit| next >= limit)
+                    || cells
+                        .get(&next)
+                        .is_none_or(|kind| (*kind == CellKind::Instruction) != instruction_cells)
+                {
+                    break;
+                }
+                last = next;
+            }
+            let kind = if !instruction_cells {
+                LinkedSymbolKind::Data
+            } else if name.starts_with("__ex3_") {
+                LinkedSymbolKind::Runtime
+            } else if c_function_names.contains(name.as_str()) || instructions.contains_key(start) {
+                LinkedSymbolKind::CFunction
+            } else {
+                LinkedSymbolKind::Assembly
+            };
+            Some(LinkedSymbolInfo {
+                name: name.clone(),
+                address_start: *start,
+                address_end_exclusive: last.wrapping_add(1),
+                kind,
+            })
+        })
+        .collect()
 }
 
 fn contiguous_ranges(addresses: &BTreeSet<Address>) -> Vec<FunctionAddressRange> {
