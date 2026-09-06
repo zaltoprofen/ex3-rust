@@ -1,11 +1,20 @@
 //! Compiler for the pointerless EX3 C v0.1 subset.
 mod ast;
 mod codegen;
+mod debug;
 mod diagnostic;
 mod lexer;
 mod parser;
 mod sema;
 
+pub use ast::ScalarType;
+pub use debug::{
+    ActiveTemporaryDebugInfo, AssemblyLineDebugInfo, Compilation, CompilerDebugInfo,
+    DynamicStackSlotDebugInfo, DynamicStackSlotKind, EmitDebugContext, FixedFrameState,
+    FunctionDebugId, FunctionDebugSymbols, FunctionFrameDebugInfo, GeneratedAssembly,
+    LocalDebugSymbol, LocalSlotDebugInfo, ParameterDebugSymbol, ParameterSlotDebugInfo,
+    ReturnAddressSlotDebugInfo, TemporaryRole,
+};
 pub use diagnostic::{CcError, CcErrors, Span};
 
 pub(crate) fn is_implementation_reserved(name: &str) -> bool {
@@ -13,11 +22,23 @@ pub(crate) fn is_implementation_reserved(name: &str) -> bool {
 }
 
 pub fn compile(source: &str) -> Result<String, CcErrors> {
+    Ok(compile_with_debug_info(source)?.assembly)
+}
+
+pub fn compile_with_debug_info(source: &str) -> Result<Compilation, CcErrors> {
     let tokens = lexer::lex(source).map_err(CcErrors)?;
     let ast = parser::parse(tokens).map_err(CcErrors)?;
     let program = sema::analyze(ast).map_err(CcErrors)?;
     let plan = codegen::plan(&program).map_err(CcErrors)?;
-    Ok(codegen::generate(&program, &plan))
+    let generated = codegen::generate(&program, &plan);
+    let frames = plan.into_debug_frames();
+    let mut debug_info = program.debug_info;
+    debug_info.frames = frames;
+    debug_info.assembly_lines = generated.debug_lines;
+    Ok(Compilation {
+        assembly: generated.text,
+        debug_info,
+    })
 }
 
 #[cfg(test)]
@@ -47,6 +68,395 @@ mod tests {
             .into_iter()
             .map(|error| error.message)
             .collect()
+    }
+
+    fn assembly_line(compilation: &Compilation, line: u32) -> &str {
+        compilation
+            .assembly
+            .lines()
+            .nth(line as usize - 1)
+            .expect("debug metadata referenced a missing assembly line")
+            .trim()
+    }
+
+    fn states_for_instruction<'a>(
+        compilation: &'a Compilation,
+        instruction: &str,
+    ) -> Vec<&'a AssemblyLineDebugInfo> {
+        compilation
+            .debug_info
+            .assembly_lines
+            .iter()
+            .filter(|state| assembly_line(compilation, state.assembly_line) == instruction)
+            .collect()
+    }
+
+    #[test]
+    fn debug_symbols_preserve_parameter_local_names_types_and_shadowing() {
+        let compilation = compile_with_debug_info(
+            r#"
+                int add(int lhs, unsigned int rhs) {
+                    int value;
+                    int result;
+                    value = lhs;
+                    {
+                        unsigned int value;
+                        value = rhs;
+                    }
+                    result = value;
+                    return result;
+                }
+                int main(void) { return add(1, 2u); }
+            "#,
+        )
+        .unwrap();
+        let add = compilation
+            .debug_info
+            .functions
+            .iter()
+            .find(|function| function.name == "add")
+            .unwrap();
+
+        assert_eq!(add.id.index(), 0);
+        assert_eq!(
+            add.parameters,
+            [
+                ParameterDebugSymbol {
+                    index: 0,
+                    name: "lhs".into(),
+                    ty: ScalarType::Int32,
+                },
+                ParameterDebugSymbol {
+                    index: 1,
+                    name: "rhs".into(),
+                    ty: ScalarType::UInt32,
+                },
+            ]
+        );
+        assert_eq!(
+            add.locals,
+            [
+                LocalDebugSymbol {
+                    slot: 0,
+                    name: "value".into(),
+                    ty: ScalarType::Int32,
+                },
+                LocalDebugSymbol {
+                    slot: 1,
+                    name: "result".into(),
+                    ty: ScalarType::Int32,
+                },
+                LocalDebugSymbol {
+                    slot: 2,
+                    name: "value".into(),
+                    ty: ScalarType::UInt32,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn debug_symbols_include_definitions_but_not_prototypes_or_builtins() {
+        let compilation = compile_with_debug_info(
+            r#"
+                void putchar(int c);
+                int identity(int value);
+                int identity(int value) { return value; }
+                int main(void) { putchar(65); return identity(7); }
+            "#,
+        )
+        .unwrap();
+        let functions = &compilation.debug_info.functions;
+
+        assert_eq!(
+            functions
+                .iter()
+                .map(|function| (function.id.index(), function.name.as_str()))
+                .collect::<Vec<_>>(),
+            [(0, "identity"), (1, "main")]
+        );
+    }
+
+    #[test]
+    fn compile_wrapper_matches_debug_compile() {
+        for source in [
+            "int main(void) { return 42; }",
+            "int add(int a, int b) { return a + b; } int main(void) { return add(3, 4); }",
+            "int main(void) { unsigned int value; value = 0xffffffffu; return value / 3u; }",
+        ] {
+            let assembly = compile(source).unwrap();
+            let with_debug = compile_with_debug_info(source).unwrap();
+            assert_eq!(assembly, with_debug.assembly, "source: {source}");
+
+            let plain_image = Assembler::new().assemble(&assembly).unwrap().image;
+            let debug_image = Assembler::new()
+                .assemble(&with_debug.assembly)
+                .unwrap()
+                .image;
+            assert_eq!(plain_image, debug_image, "source: {source}");
+        }
+    }
+
+    #[test]
+    fn debug_frame_layout_uses_codegen_slot_offsets() {
+        let compilation = compile_with_debug_info(
+            r#"
+                int calculate(int lhs, unsigned int rhs) {
+                    int value;
+                    value = lhs + rhs;
+                    return value;
+                }
+                int main(void) { return calculate(3, 4u); }
+            "#,
+        )
+        .unwrap();
+        let frame = compilation
+            .debug_info
+            .frames
+            .iter()
+            .find(|frame| frame.name == "calculate")
+            .unwrap();
+
+        assert_eq!(frame.function_id.index(), 0);
+        assert_eq!(frame.frame_size, 3);
+        assert_eq!(frame.temporary_count, 2);
+        assert_eq!(frame.return_address.frame_offset, 3);
+        assert_eq!(frame.locals[0].slot, 0);
+        assert_eq!(frame.locals[0].frame_offset, 0);
+        assert_eq!(frame.parameters[0].index, 0);
+        assert_eq!(frame.parameters[0].frame_offset, 4);
+        assert_eq!(frame.parameters[1].index, 1);
+        assert_eq!(frame.parameters[1].frame_offset, 5);
+    }
+
+    #[test]
+    fn empty_function_frame_still_describes_the_return_address() {
+        let compilation = compile_with_debug_info("int main(void) { return 42; }").unwrap();
+        let frame = &compilation.debug_info.frames[0];
+
+        assert_eq!(frame.name, "main");
+        assert_eq!(frame.frame_size, 0);
+        assert_eq!(frame.temporary_count, 0);
+        assert!(frame.parameters.is_empty());
+        assert!(frame.locals.is_empty());
+        assert_eq!(frame.return_address.frame_offset, 0);
+    }
+
+    #[test]
+    fn assembly_debug_lines_cover_only_c_function_instructions() {
+        let compilation = compile_with_debug_info(
+            r#"
+                int data = 7;
+                int main(void) { return 2 * 3; }
+            "#,
+        )
+        .unwrap();
+        let debug_lines = &compilation.debug_info.assembly_lines;
+        assert!(!debug_lines.is_empty());
+
+        for state in debug_lines {
+            let line = assembly_line(&compilation, state.assembly_line);
+            assert!(!line.is_empty());
+            assert!(!line.starts_with(';'));
+            assert!(!line.starts_with("ORG "));
+            assert!(!line.starts_with("HEX ") && !line.contains(": HEX "));
+            assert!(!line.ends_with(':'));
+            assert!(state.function_id.index() < compilation.debug_info.functions.len());
+        }
+
+        let mapped_lines = debug_lines
+            .iter()
+            .map(|state| state.assembly_line)
+            .collect::<std::collections::HashSet<_>>();
+        let source_lines = compilation.assembly.lines().collect::<Vec<_>>();
+        let startup_call = source_lines
+            .iter()
+            .position(|line| line.trim() == "CALL main")
+            .unwrap() as u32
+            + 1;
+        let runtime_label = source_lines
+            .iter()
+            .position(|line| line.trim() == "__ex3_mul_i32:")
+            .unwrap() as u32
+            + 1;
+        assert!(!mapped_lines.contains(&startup_call));
+        assert!(!mapped_lines.contains(&(startup_call + 1))); // startup HLT
+        assert!(!mapped_lines.contains(&(runtime_label + 1)));
+        assert_eq!(states_for_instruction(&compilation, "PUSH").len(), 2);
+    }
+
+    #[test]
+    fn instruction_states_track_frame_deltas_and_outgoing_arguments() {
+        let compilation = compile_with_debug_info(
+            r#"
+                int id(int value) { return value; }
+                int sum3(int first, int second, int third) {
+                    return first + second + third;
+                }
+                int main(void) { return sum3(id(1), 2, 3); }
+            "#,
+        )
+        .unwrap();
+        let sum = compilation
+            .debug_info
+            .functions
+            .iter()
+            .find(|function| function.name == "sum3")
+            .unwrap();
+        let sum_states = compilation
+            .debug_info
+            .assembly_lines
+            .iter()
+            .filter(|state| state.function_id == sum.id)
+            .collect::<Vec<_>>();
+        let prologue = sum_states
+            .iter()
+            .find(|state| assembly_line(&compilation, state.assembly_line) == "ADJSP -2")
+            .unwrap();
+        assert_eq!(prologue.frame_base_delta, -2);
+        assert!(sum_states.iter().any(|state| state.frame_base_delta == 0));
+        let epilogue = sum_states
+            .iter()
+            .find(|state| assembly_line(&compilation, state.assembly_line) == "ADJSP 2")
+            .unwrap();
+        assert_eq!(epilogue.frame_base_delta, 0);
+        let ret = sum_states
+            .iter()
+            .find(|state| assembly_line(&compilation, state.assembly_line) == "RET")
+            .unwrap();
+        assert_eq!(ret.frame_base_delta, -2);
+
+        let call_sum = states_for_instruction(&compilation, "CALL sum3")
+            .into_iter()
+            .next()
+            .unwrap();
+        assert_eq!(call_sum.frame_base_delta, 3);
+        assert_eq!(call_sum.dynamic_stack_slots.len(), 3);
+        let outgoing = call_sum
+            .dynamic_stack_slots
+            .iter()
+            .map(|slot| match &slot.kind {
+                DynamicStackSlotKind::OutgoingArgument {
+                    callee,
+                    argument_index,
+                    parameter_name,
+                } => (
+                    slot.frame_offset,
+                    callee.as_str(),
+                    *argument_index,
+                    parameter_name.as_deref(),
+                    slot.ty,
+                ),
+                kind => panic!("unexpected dynamic slot kind: {kind:?}"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            outgoing,
+            [
+                (-1, "sum3", 2, Some("third"), Some(ScalarType::Int32)),
+                (-2, "sum3", 1, Some("second"), Some(ScalarType::Int32)),
+                (-3, "sum3", 0, Some("first"), Some(ScalarType::Int32)),
+            ]
+        );
+
+        let call_id = states_for_instruction(&compilation, "CALL id")
+            .into_iter()
+            .next()
+            .unwrap();
+        assert_eq!(call_id.frame_base_delta, 3);
+        assert_eq!(call_id.dynamic_stack_slots.len(), 3);
+        assert!(call_id.dynamic_stack_slots.iter().any(|slot| matches!(
+            slot.kind,
+            DynamicStackSlotKind::OutgoingArgument {
+                argument_index: 0,
+                ref parameter_name,
+                ..
+            } if parameter_name.as_deref() == Some("value")
+        )));
+        assert!(compilation
+            .debug_info
+            .assembly_lines
+            .iter()
+            .any(|state| { state.frame_base_delta == 1 && !state.dynamic_stack_slots.is_empty() }));
+        assert!(compilation
+            .debug_info
+            .assembly_lines
+            .iter()
+            .any(|state| { state.frame_base_delta == 2 && state.dynamic_stack_slots.len() == 2 }));
+    }
+
+    #[test]
+    fn instruction_states_track_runtime_arguments_and_temporary_roles() {
+        let compilation = compile_with_debug_info(
+            r#"
+                int main(void) {
+                    int value;
+                    value = -1;
+                    switch (value + 2) {
+                    case 1: return (value == -1) * (3 + 4);
+                    default: return 0;
+                    }
+                }
+            "#,
+        )
+        .unwrap();
+        let runtime_call = states_for_instruction(&compilation, "CALL __ex3_mul_i32")
+            .into_iter()
+            .next()
+            .unwrap();
+        assert_eq!(runtime_call.frame_base_delta, 2);
+        assert_eq!(runtime_call.dynamic_stack_slots.len(), 2);
+        assert_eq!(
+            runtime_call
+                .dynamic_stack_slots
+                .iter()
+                .map(|slot| (slot.frame_offset, &slot.kind))
+                .collect::<Vec<_>>(),
+            [
+                (
+                    -1,
+                    &DynamicStackSlotKind::RuntimeArgument {
+                        helper: "__ex3_mul_i32".into(),
+                        argument_index: 1,
+                    }
+                ),
+                (
+                    -2,
+                    &DynamicStackSlotKind::RuntimeArgument {
+                        helper: "__ex3_mul_i32".into(),
+                        argument_index: 0,
+                    }
+                ),
+            ]
+        );
+
+        let active = compilation
+            .debug_info
+            .assembly_lines
+            .iter()
+            .flat_map(|state| &state.active_temporaries)
+            .collect::<Vec<_>>();
+        for role in [
+            TemporaryRole::UnaryOperand,
+            TemporaryRole::BinaryLeft,
+            TemporaryRole::BinaryRight,
+            TemporaryRole::ComparisonLeft,
+            TemporaryRole::ComparisonRight,
+            TemporaryRole::SwitchValue,
+        ] {
+            assert!(active.iter().any(|temporary| temporary.role == role));
+        }
+        let slot_zero_descriptions = active
+            .iter()
+            .filter(|temporary| temporary.slot == 0)
+            .map(|temporary| temporary.display_name.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        assert!(slot_zero_descriptions.len() > 1);
+        assert!(compilation
+            .debug_info
+            .assembly_lines
+            .iter()
+            .any(|state| state.active_temporaries.is_empty()));
     }
 
     #[test]

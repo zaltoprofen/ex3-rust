@@ -1,11 +1,12 @@
 use crate::cc::{
     ast::{BinOp, ScalarType, Type, UnOp},
-    Span,
+    CompilerDebugInfo, Span,
 };
 
 pub(crate) struct AnalyzedProgram {
     pub globals: Vec<ResolvedGlobal>,
     pub functions: Vec<ResolvedFunction>,
+    pub debug_info: CompilerDebugInfo,
 }
 
 #[derive(Clone, Copy, Debug)]

@@ -1,16 +1,18 @@
 use crate::{
     dto::{
         AssemblySourceMapRow, CompileResult, CpuSnapshot, DisassemblyRow, MemoryRow,
-        RunChunkResult, RunStatus, StepOutcomeDto, StepResult, SymbolEntry,
+        RunChunkResult, RunStatus, StackViewSnapshot, StepOutcomeDto, StepResult, SymbolEntry,
     },
     error::Ex3Error,
 };
 use ex3_core::{
     assembler::{Assembler, AssemblySourceMapEntry, CellKind},
     cc,
+    debug_info::{link_program_debug_info, ProgramDebugInfo},
     debugger::{Debugger, RunStop},
     emulator::{ArrayMemory, Cpu, DeterministicIoBus, IoKind, Memory, StepOutcome},
     isa::{decode, Address},
+    stack_view::{build_stack_view, NonCContextHint, StackViewOptions, DEFAULT_MAX_UNWIND_DEPTH},
 };
 use std::collections::BTreeMap;
 
@@ -25,6 +27,8 @@ pub struct SessionCore {
     assembly: String,
     source_map: Vec<AssemblySourceMapEntry>,
     symbols: BTreeMap<String, Address>,
+    program_debug_info: Option<ProgramDebugInfo>,
+    non_c_context_hint: Option<NonCContextHint>,
     loaded: bool,
 }
 
@@ -45,15 +49,22 @@ impl SessionCore {
             assembly: String::new(),
             source_map: Vec::new(),
             symbols: BTreeMap::new(),
+            program_debug_info: None,
+            non_c_context_hint: None,
             loaded: false,
         }
     }
 
     pub fn compile_and_load(&mut self, source: &str) -> Result<CompileResult, Ex3Error> {
-        let assembly = cc::compile(source).map_err(Ex3Error::from)?;
+        let compilation = cc::compile_with_debug_info(source).map_err(Ex3Error::from)?;
+        let assembly = compilation.assembly;
         let assembled = Assembler::new()
             .assemble(&assembly)
             .map_err(Ex3Error::from)?;
+        let program_debug_info = link_program_debug_info(&compilation.debug_info, &assembled)
+            .map_err(|error| {
+                Ex3Error::session(format!("failed to link debug metadata: {error}"))
+            })?;
         let loaded_words = u32::try_from(assembled.image.cells.len())
             .map_err(|_| Ex3Error::session("loaded word count exceeds u32"))?;
         let source_map_rows = assembled
@@ -78,6 +89,8 @@ impl SessionCore {
         self.assembly = assembly.clone();
         self.source_map = source_map;
         self.symbols = symbols;
+        self.program_debug_info = Some(program_debug_info);
+        self.non_c_context_hint = None;
         self.loaded = true;
 
         Ok(CompileResult {
@@ -94,6 +107,7 @@ impl SessionCore {
         self.cpu.reset();
         self.memory = self.initial_memory.clone();
         self.io = DeterministicIoBus::default();
+        self.non_c_context_hint = None;
         self.snapshot()
     }
 
@@ -103,6 +117,8 @@ impl SessionCore {
             .debugger
             .step(&mut self.cpu, &mut self.memory, &mut self.io)
             .map_err(Ex3Error::from)?;
+        self.non_c_context_hint =
+            matches!(outcome, StepOutcome::Interrupted).then_some(NonCContextHint::Interrupt);
         let (outcome, pc_before, instruction) = match outcome {
             StepOutcome::Executed {
                 pc_before,
@@ -135,6 +151,7 @@ impl SessionCore {
                 u64::from(max_instructions),
             )
             .map_err(Ex3Error::from)?;
+        self.non_c_context_hint = None;
         let executed = self.cpu.state().executed_instructions.wrapping_sub(before) as u32;
         let (status, breakpoint_address) = match stop {
             RunStop::StepLimit => (RunStatus::Running, None),
@@ -172,6 +189,33 @@ impl SessionCore {
             input_register: io.input_register,
             assembly_line: self.source_line(state.pc),
         })
+    }
+
+    pub fn stack_view(&self) -> Result<StackViewSnapshot, Ex3Error> {
+        self.stack_view_with_depth(DEFAULT_MAX_UNWIND_DEPTH as u32)
+    }
+
+    pub fn stack_view_with_depth(&self, max_depth: u32) -> Result<StackViewSnapshot, Ex3Error> {
+        self.ensure_loaded()?;
+        if max_depth == 0 || max_depth > DEFAULT_MAX_UNWIND_DEPTH as u32 {
+            return Err(Ex3Error::session(format!(
+                "stack depth must be between 1 and {DEFAULT_MAX_UNWIND_DEPTH}"
+            )));
+        }
+        let state = self.cpu.state();
+        let view = build_stack_view(
+            self.program_debug_info.as_ref(),
+            &self.memory,
+            state.pc,
+            state.sp,
+            StackViewOptions {
+                max_depth: max_depth as usize,
+                non_c_context_hint: self.non_c_context_hint,
+                ..StackViewOptions::default()
+            },
+        )
+        .map_err(|error| Ex3Error::session(format!("failed to build stack view: {error}")))?;
+        Ok(StackViewSnapshot::from(view))
     }
 
     pub fn memory_range(&self, start: u16, count: u32) -> Result<Vec<MemoryRow>, Ex3Error> {
@@ -290,7 +334,9 @@ impl SessionCore {
 mod tests {
     use super::*;
     use crate::{
-        dto::{RunStatus, StepOutcomeDto},
+        dto::{
+            RunStatus, StackSlotKindDto, StackSlotStateDto, StackViewContextDto, StepOutcomeDto,
+        },
         error::ErrorStage,
     };
     use ex3_core::emulator::IoBus;
@@ -328,9 +374,11 @@ mod tests {
     fn failed_compile_does_not_replace_loaded_program() {
         let mut session = SessionCore::new();
         session.compile_and_load(RETURN_42).unwrap();
+        let debug_before = session.program_debug_info.clone();
         let error = session.compile_and_load("int main( {").unwrap_err();
         assert_eq!(error.stage, ErrorStage::Compiler);
         assert!(!error.diagnostics.is_empty());
+        assert_eq!(session.program_debug_info, debug_before);
 
         let result = session.run_chunk(1_000_000).unwrap();
         assert_eq!(result.status, RunStatus::Halted);
@@ -341,6 +389,7 @@ mod tests {
     fn reset_restores_cpu_memory_and_io_but_preserves_breakpoints() {
         let mut session = SessionCore::new();
         session.compile_and_load(RETURN_42).unwrap();
+        let debug_before = session.program_debug_info.clone();
         let initial_word = session.memory.read(Address::RESET);
         session.memory.write(Address::RESET, 0);
         session.io.write_output(IoKind::Serial, b'X');
@@ -352,6 +401,7 @@ mod tests {
         assert_eq!(session.memory.read(Address::RESET), initial_word);
         assert_eq!(session.serial_output(), "");
         assert_eq!(session.breakpoints(), vec![Address::RESET.get()]);
+        assert_eq!(session.program_debug_info, debug_before);
         session.clear_breakpoints();
         assert!(session.breakpoints().is_empty());
     }
@@ -447,5 +497,210 @@ mod tests {
         assert_eq!(session.snapshot().unwrap_err().stage, ErrorStage::Session);
         assert_eq!(session.step().unwrap_err().stage, ErrorStage::Session);
         assert_eq!(session.run_chunk(1).unwrap_err().stage, ErrorStage::Session);
+        assert_eq!(session.stack_view().unwrap_err().stage, ErrorStage::Session);
+    }
+
+    #[test]
+    fn stack_view_tracks_current_machine_state_and_survives_reset() {
+        let mut session = SessionCore::new();
+        session
+            .compile_and_load("int main(void) { int value; value = 7; return value; }")
+            .unwrap();
+        let startup = session.stack_view().unwrap();
+        assert!(!startup.available);
+        assert_eq!(startup.context, StackViewContextDto::Startup);
+        assert!(!startup.raw_stack.is_empty());
+
+        session.step().unwrap(); // startup CALL enters main
+        let entered = session.stack_view().unwrap();
+        assert!(entered.available);
+        assert_eq!(entered.context, StackViewContextDto::CFunction);
+        assert_eq!(entered.frames[0].function_name, "main");
+        assert!(entered.frames[0].current);
+        assert_eq!(entered.pc, session.cpu.state().pc.get());
+        assert_eq!(entered.sp, session.cpu.state().sp.get());
+
+        session.run_chunk(1).unwrap(); // prologue uses the current CPU/memory state
+        let after_prologue = session.stack_view().unwrap();
+        assert_eq!(
+            after_prologue.frames[0].frame_sp,
+            session.cpu.state().sp.get()
+        );
+
+        let debug_before_reset = session.program_debug_info.clone();
+        session.reset().unwrap();
+        assert_eq!(session.program_debug_info, debug_before_reset);
+        session.step().unwrap();
+        assert!(session.stack_view().unwrap().available);
+    }
+
+    #[test]
+    fn successful_recompile_replaces_stack_debug_metadata() {
+        let mut session = SessionCore::new();
+        session
+            .compile_and_load("int first(void) { return 1; } int main(void) { return first(); }")
+            .unwrap();
+        assert!(session
+            .program_debug_info
+            .as_ref()
+            .unwrap()
+            .functions
+            .iter()
+            .any(|function| function.name == "first"));
+
+        session
+            .compile_and_load("int second(void) { return 2; } int main(void) { return second(); }")
+            .unwrap();
+        let functions = &session.program_debug_info.as_ref().unwrap().functions;
+        assert!(functions.iter().any(|function| function.name == "second"));
+        assert!(!functions.iter().any(|function| function.name == "first"));
+    }
+
+    #[test]
+    fn stack_view_supports_metadata_free_fallback_and_validates_depth() {
+        let mut session = SessionCore::new();
+        session.compile_and_load(RETURN_42).unwrap();
+        session.program_debug_info = None;
+        let fallback = session.stack_view().unwrap();
+        assert!(!fallback.available);
+        assert_eq!(fallback.context, StackViewContextDto::Unmapped);
+        assert!(!fallback.raw_stack.is_empty());
+        assert!(!fallback.warnings.is_empty());
+        assert!(session.stack_view_with_depth(0).is_err());
+        assert!(session.stack_view_with_depth(257).is_err());
+    }
+
+    #[test]
+    fn stack_view_dto_preserves_signed_and_unsigned_parameter_values() {
+        let mut session = SessionCore::new();
+        session
+            .compile_and_load(
+                r#"
+                    int values(int signed_value, unsigned int unsigned_value) {
+                        return signed_value + unsigned_value;
+                    }
+                    int main(void) { return values(-1, 0xffffffffu); }
+                "#,
+            )
+            .unwrap();
+        let frame = (0..100)
+            .find_map(|_| {
+                let view = session.stack_view().unwrap();
+                view.frames
+                    .into_iter()
+                    .find(|frame| frame.function_name == "values")
+                    .or_else(|| {
+                        session.step().unwrap();
+                        None
+                    })
+            })
+            .expect("values frame was not entered");
+        let signed = frame
+            .slots
+            .iter()
+            .find(|slot| slot.name == "signed_value")
+            .unwrap();
+        assert_eq!(signed.kind, StackSlotKindDto::Parameter);
+        assert_eq!(signed.type_name, Some("int32_t"));
+        assert_eq!(signed.raw_value, u32::MAX);
+        assert_eq!(signed.signed_value, Some(-1));
+        assert_eq!(signed.unsigned_value, None);
+        let unsigned = frame
+            .slots
+            .iter()
+            .find(|slot| slot.name == "unsigned_value")
+            .unwrap();
+        assert_eq!(unsigned.type_name, Some("uint32_t"));
+        assert_eq!(unsigned.raw_value, u32::MAX);
+        assert_eq!(unsigned.signed_value, None);
+        assert_eq!(unsigned.unsigned_value, Some(u32::MAX));
+    }
+
+    #[test]
+    fn stack_view_dto_exposes_logical_outgoing_argument_identity() {
+        let mut session = SessionCore::new();
+        session
+            .compile_and_load(
+                r#"
+                    int add(int left, int right) { return left + right; }
+                    int main(void) { return add(10, 20); }
+                "#,
+            )
+            .unwrap();
+        let outgoing = (0..100)
+            .find_map(|_| {
+                let slots = session
+                    .stack_view()
+                    .unwrap()
+                    .frames
+                    .into_iter()
+                    .flat_map(|frame| frame.slots)
+                    .filter(|slot| slot.kind == StackSlotKindDto::OutgoingArgument)
+                    .collect::<Vec<_>>();
+                if slots.len() == 2 {
+                    Some(slots)
+                } else {
+                    session.step().unwrap();
+                    None
+                }
+            })
+            .expect("outgoing arguments were not observed");
+
+        assert_eq!(
+            outgoing
+                .iter()
+                .map(|slot| slot.argument_index)
+                .collect::<Vec<_>>(),
+            [Some(1), Some(0)]
+        );
+        assert!(outgoing
+            .iter()
+            .all(|slot| slot.call_target.as_deref() == Some("add")));
+    }
+
+    #[test]
+    fn stack_view_dto_preserves_fixed_storage_lifetime() {
+        let mut session = SessionCore::new();
+        session
+            .compile_and_load("int main(void) { int local; local = 1; return local; }")
+            .unwrap();
+        session.step().unwrap();
+        let entry = session.stack_view().unwrap();
+        let entry_local = entry.frames[0]
+            .slots
+            .iter()
+            .find(|slot| slot.kind == StackSlotKindDto::Local)
+            .unwrap();
+        assert_eq!(entry_local.state, StackSlotStateDto::NotAllocated);
+        assert_eq!(entry_local.signed_value, None);
+
+        session.step().unwrap();
+        let allocated = session.stack_view().unwrap();
+        let allocated_local = allocated.frames[0]
+            .slots
+            .iter()
+            .find(|slot| slot.kind == StackSlotKindDto::Local)
+            .unwrap();
+        assert_eq!(allocated_local.state, StackSlotStateDto::CurrentStorage);
+
+        let released = (0..100)
+            .find_map(|_| {
+                let view = session.stack_view().unwrap();
+                let local = view
+                    .frames
+                    .first()?
+                    .slots
+                    .iter()
+                    .find(|slot| slot.kind == StackSlotKindDto::Local)?;
+                if local.state == StackSlotStateDto::Released {
+                    Some((local.signed_value, local.raw_value))
+                } else {
+                    session.step().unwrap();
+                    None
+                }
+            })
+            .expect("released frame state was not observed");
+        assert_eq!(released.0, None);
+        assert_eq!(released.1, 1);
     }
 }

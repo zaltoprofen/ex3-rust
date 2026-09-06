@@ -8,6 +8,7 @@ import { MemoryView } from "./components/MemoryView";
 import { RegisterView } from "./components/RegisterView";
 import { SerialConsole } from "./components/SerialConsole";
 import { SourceEditor } from "./components/SourceEditor";
+import { StackView } from "./components/StackView";
 import {
   compileMachine,
   errorState,
@@ -86,6 +87,7 @@ export default function App() {
       stopMessage: null,
       errorStage: null,
       errorMessage: null,
+      stackViewError: null,
     };
     commit(current);
     await nextFrame();
@@ -150,7 +152,11 @@ export default function App() {
   };
 
   const setMemoryAddress = (address: number) => {
-    if (!session || machineRef.current.snapshot === null) return;
+    if (
+      !session ||
+      machineRef.current.snapshot === null ||
+      machineRef.current.phase === "running"
+    ) return;
     try {
       commit(selectMemory(session, machineRef.current, address));
     } catch (error) {
@@ -257,7 +263,17 @@ export default function App() {
         <FlagsView snapshot={machine.snapshot} />
       </div>
 
-      <div className="debug-grid">
+      <div className="stack-view-row">
+        <StackView
+          snapshot={machine.stackView}
+          error={machine.stackViewError}
+          loading={machine.busy}
+          memorySelectionDisabled={controlsDisabled || machine.snapshot === null}
+          onSelectAddress={setMemoryAddress}
+        />
+      </div>
+
+      <div className="disassembly-memory-grid">
         <DisassemblyView
           rows={machine.disassembly}
           pc={machine.snapshot?.pc ?? null}
@@ -293,6 +309,7 @@ async function executeSingleOperation(
     diagnostics: [],
     errorStage: null,
     errorMessage: null,
+    stackViewError: null,
     stopMessage: null,
   };
   commit(pending);

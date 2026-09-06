@@ -17,6 +17,55 @@ fn compile_step_and_run_are_callable_through_the_wasm_boundary() {
     let source_map = Reflect::get(&compiled, &JsValue::from_str("sourceMap")).unwrap();
     assert!(js_sys::Array::is_array(&source_map));
     assert!(js_sys::Array::from(&source_map).length() > 0);
+    let startup_stack = session.stack_view().unwrap();
+    assert_eq!(
+        Reflect::get(&startup_stack, &JsValue::from_str("context"))
+            .unwrap()
+            .as_string()
+            .as_deref(),
+        Some("startup")
+    );
+    assert_eq!(
+        Reflect::get(&startup_stack, &JsValue::from_str("available"))
+            .unwrap()
+            .as_bool(),
+        Some(false)
+    );
+    assert!(js_sys::Array::is_array(
+        &Reflect::get(&startup_stack, &JsValue::from_str("rawStack")).unwrap()
+    ));
+    session.step().unwrap();
+    let c_stack = session.stack_view_with_depth(16).unwrap();
+    assert_eq!(
+        Reflect::get(&c_stack, &JsValue::from_str("context"))
+            .unwrap()
+            .as_string()
+            .as_deref(),
+        Some("c-function")
+    );
+    let frames =
+        js_sys::Array::from(&Reflect::get(&c_stack, &JsValue::from_str("frames")).unwrap());
+    assert!(frames.length() > 0);
+    let first_frame = frames.get(0);
+    assert!(Reflect::has(&first_frame, &JsValue::from_str("functionName")).unwrap());
+    assert!(Reflect::has(&first_frame, &JsValue::from_str("currentSp")).unwrap());
+    let slots =
+        js_sys::Array::from(&Reflect::get(&first_frame, &JsValue::from_str("slots")).unwrap());
+    assert_eq!(
+        Reflect::get(&slots.get(0), &JsValue::from_str("kind"))
+            .unwrap()
+            .as_string()
+            .as_deref(),
+        Some("return-address")
+    );
+    assert_eq!(
+        Reflect::get(&slots.get(0), &JsValue::from_str("state"))
+            .unwrap()
+            .as_string()
+            .as_deref(),
+        Some("control")
+    );
+    assert!(session.stack_view_with_depth(0).is_err());
     let snapshot = session.snapshot().unwrap();
     assert!(
         Reflect::get(&snapshot, &JsValue::from_str("executedInstructions"))

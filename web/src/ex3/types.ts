@@ -64,6 +64,70 @@ export interface MemoryRow {
   word: number;
 }
 
+export type StackViewContext =
+  | "c-function"
+  | "runtime"
+  | "startup"
+  | "assembly"
+  | "interrupt"
+  | "unmapped";
+
+export type StackSlotKind =
+  | "parameter"
+  | "return-address"
+  | "local"
+  | "temporary"
+  | "outgoing-argument"
+  | "runtime-argument"
+  | "unknown";
+
+export type StackSlotState =
+  | "value"
+  | "current-storage"
+  | "inactive-scratch"
+  | "not-allocated"
+  | "released"
+  | "control"
+  | "unknown";
+
+export interface StackSlotDto {
+  address: number;
+  frameOffset: number;
+  kind: StackSlotKind;
+  name: string;
+  typeName: "int32_t" | "uint32_t" | null;
+  rawValue: number;
+  signedValue: number | null;
+  unsignedValue: number | null;
+  active: boolean | null;
+  state: StackSlotState;
+  description: string | null;
+  argumentIndex: number | null;
+  callTarget: string | null;
+}
+
+export interface StackFrameDto {
+  functionName: string;
+  current: boolean;
+  pc: number | null;
+  currentSp: number;
+  frameSp: number;
+  returnAddress: number | null;
+  returnSymbol: string | null;
+  slots: StackSlotDto[];
+}
+
+export interface StackViewSnapshot {
+  available: boolean;
+  context: StackViewContext;
+  contextSymbol: string | null;
+  pc: number;
+  sp: number;
+  frames: StackFrameDto[];
+  rawStack: MemoryRow[];
+  warnings: string[];
+}
+
 export interface DisassemblyRow {
   address: number;
   word: number;
@@ -90,6 +154,7 @@ export interface Ex3SessionApi {
   reset(): CpuSnapshot;
   step(): StepResult;
   run_chunk(maxInstructions: number): RunChunkResult;
+  stack_view(): StackViewSnapshot;
   memory_range(start: number, count: number): MemoryRow[];
   disassembly_range(start: number, count: number): DisassemblyRow[];
   toggle_breakpoint(address: number): boolean;
@@ -107,6 +172,8 @@ export interface MachineUiState {
   snapshot: CpuSnapshot | null;
   disassembly: DisassemblyRow[];
   stackMemory: MemoryRow[];
+  stackView: StackViewSnapshot | null;
+  stackViewError: string | null;
   selectedMemory: MemoryRow[];
   selectedMemoryAddress: number;
   serialOutput: string;

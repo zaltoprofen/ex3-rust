@@ -13,6 +13,8 @@ export function createInitialMachineState(): MachineUiState {
     snapshot: null,
     disassembly: [],
     stackMemory: [],
+    stackView: null,
+    stackViewError: null,
     selectedMemory: [],
     selectedMemoryAddress: 0,
     serialOutput: "",

@@ -2,7 +2,9 @@
 
 pub mod assembler;
 pub mod cc;
+pub mod debug_info;
 pub mod debugger;
 pub mod emulator;
 pub mod isa;
 pub mod output;
+pub mod stack_view;
