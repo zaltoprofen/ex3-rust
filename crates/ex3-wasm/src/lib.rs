@@ -46,6 +46,14 @@ impl Ex3Session {
         serialize_result(self.core.snapshot())
     }
 
+    pub fn stack_view(&self) -> Result<JsValue, JsValue> {
+        serialize_result(self.core.stack_view())
+    }
+
+    pub fn stack_view_with_depth(&self, max_depth: u32) -> Result<JsValue, JsValue> {
+        serialize_result(self.core.stack_view_with_depth(max_depth))
+    }
+
     pub fn memory_range(&self, start: u16, count: u32) -> Result<JsValue, JsValue> {
         serialize_result(self.core.memory_range(start, count))
     }
