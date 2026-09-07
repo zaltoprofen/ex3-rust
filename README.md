@@ -2,6 +2,12 @@
 
 EX3 v3.0 ISA の C サブセットコンパイラ、アセンブラ、エミュレータ、デバッガです。v1/v2とのバイナリ・ソース互換性はありません。
 
+仕様書:
+
+- [EX3 v3.0 ISA Specification](docs/ex3_v3_isa_spec.md)
+- [EX3 v3.0 ABI Specification](docs/ex3_v3_abi_spec.md)
+- [EX3 C v0.1 Language Specification](docs/ex3_c_v0_1_language_spec.md)
+
 実装範囲:
 
 - 32-bit固定長命令（`format[31:29] + opcode[28:24] + modifier[23:16] + operand[15:0]`）
@@ -89,4 +95,4 @@ buildをローカル確認できます。
 
 GitHub Pagesへのdeploymentは`.github/workflows/pages.yml`が担当します。リポジトリの
 Settings → Pages → Build and deploymentでSourceを「GitHub Actions」に設定すると、`main`
-へのpush後に`https://zaltoprofen.github.io/ex3-rust/`へ配信されます。
+へのpush後に[Ex3 Playground](https://zaltoprofen.github.io/ex3-rust/)へ配信されます。
