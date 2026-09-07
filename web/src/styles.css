@@ -155,7 +155,7 @@ button:disabled {
 
 .disassembly-memory-grid {
   grid-template-columns: minmax(24rem, 0.9fr) minmax(0, 1.4fr);
-  align-items: start;
+  align-items: stretch;
 }
 
 .editor-grid {
@@ -456,7 +456,7 @@ button:disabled {
 }
 
 .memory-scroll {
-  max-height: 18rem;
+  max-height: 25rem;
 }
 
 table {
@@ -720,6 +720,10 @@ th {
 
   .editor-panel {
     height: 460px;
+  }
+
+  .memory-scroll {
+    max-height: 18rem;
   }
 
   .register-grid {
