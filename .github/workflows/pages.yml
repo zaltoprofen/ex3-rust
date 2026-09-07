@@ -3,6 +3,13 @@ name: Deploy EX3 Playground
 on:
   push:
     branches: [main]
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - crates/ex3-core/**
+      - crates/ex3-wasm/**
+      - web/**
+      - .github/workflows/pages.yml
   workflow_dispatch:
 
 permissions:

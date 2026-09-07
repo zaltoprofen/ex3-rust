@@ -4,6 +4,12 @@ on:
   pull_request:
     branches:
       - main
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - crates/**
+      - web/**
+      - .github/workflows/ci.yml
 
 jobs:
   rust:
