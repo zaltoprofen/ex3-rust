@@ -194,6 +194,29 @@ export default function App() {
           <h1>Playground</h1>
         </div>
         <div className="header-actions">
+          <nav className="resource-links" aria-label="EX3 resources">
+            <a
+              href="https://github.com/zaltoprofen/ex3-rust"
+              target="_blank"
+              rel="noreferrer"
+            >
+              GitHub
+            </a>
+            <a
+              href="https://github.com/zaltoprofen/ex3-rust/blob/main/docs/ex3_v3_isa_spec.md"
+              target="_blank"
+              rel="noreferrer"
+            >
+              ISA
+            </a>
+            <a
+              href="https://github.com/zaltoprofen/ex3-rust/blob/main/docs/ex3_v3_abi_spec.md"
+              target="_blank"
+              rel="noreferrer"
+            >
+              ABI
+            </a>
+          </nav>
           <label className="sample-picker">
             Sample
             <select
